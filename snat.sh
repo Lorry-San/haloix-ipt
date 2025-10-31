@@ -85,23 +85,31 @@ save_iptables() {
     if command -v iptables-save &> /dev/null; then
         # 对于 Debian/Ubuntu
         if [ -d /etc/iptables ]; then
-            mkdir -p /etc/iptables
             iptables-save > /etc/iptables/rules.v4
         # 对于 CentOS/RHEL 7
         elif [ -f /usr/libexec/iptables/iptables.init ]; then
-            /usr/libexec/iptables/iptables.init save
+            /usr/libexec/iptables/iptables.init save 2>/dev/null
         # 对于 CentOS/RHEL 6
-        elif command -v service &> /dev/null && service iptables status &>/dev/null; then
-            service iptables save
+        elif command -v service &> /dev/null && service iptables status &>/dev/null 2>&1; then
+            service iptables save 2>/dev/null
         else
             mkdir -p /etc/iptables
             iptables-save > /etc/iptables/rules.v4
-            log_warn "规则已保存到 /etc/iptables/rules.v4，请配置开机自启"
+            log_warn "规则已保存到 /etc/iptables/rules.v4"
         fi
         log_info "规则已保存"
     else
         log_warn "未找到 iptables-save 命令，规则未持久化"
     fi
+}
+
+# 检查SNAT是否已初始化
+check_snat_initialized() {
+    # 检查是否存在SNAT规则
+    if ! iptables -t nat -L POSTROUTING -n | grep -q "$EXTERNAL_IF"; then
+        return 1
+    fi
+    return 0
 }
 
 # 初始化SNAT配置
@@ -126,34 +134,37 @@ init_snat() {
     echo 1 > /proc/sys/net/ipv4/ip_forward
     
     # 永久生效
-    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf; then
+    if ! grep -q "^net.ipv4.ip_forward=1" /etc/sysctl.conf 2>/dev/null; then
         echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
         sysctl -p > /dev/null 2>&1
     fi
     
-    # 清除现有的自定义链（如果存在）
-    iptables -t nat -D POSTROUTING -s "$INTERNAL_NETWORK" -o "$EXTERNAL_IF" -j SNAT --to-source "$EXTERNAL_IP" 2>/dev/null
+    # 清除现有的SNAT规则（如果存在）
+    while iptables -t nat -L POSTROUTING -n --line-numbers | grep "$EXTERNAL_IF" | head -1 | awk '{print $1}' | xargs -I {} iptables -t nat -D POSTROUTING {} 2>/dev/null; do
+        :
+    done
     
     # 设置FORWARD链默认策略
     log_info "设置默认策略..."
     iptables -P FORWARD DROP
     
-    # 清除旧的FORWARD规则（谨慎使用）
-    # 只删除与我们接口相关的规则
+    # 清除旧的FORWARD规则
     iptables -D FORWARD -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j LOG 2>/dev/null
     iptables -D FORWARD -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j REJECT 2>/dev/null
     
-    # 允许已建立的连接
+    # 允许已建立的连接 (如果不存在才添加)
     if ! iptables -C FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
         log_info "允许已建立和相关的连接..."
         iptables -I FORWARD 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
     fi
     
     # 添加默认允许的IP
-    log_info "配置默认允许转发的IP..."
-    for ip in "${DEFAULT_ALLOWED_IPS[@]}"; do
-        add_allowed_ip "$ip" "silent"
-    done
+    if [ ${#DEFAULT_ALLOWED_IPS[@]} -gt 0 ]; then
+        log_info "配置默认允许转发的IP..."
+        for ip in "${DEFAULT_ALLOWED_IPS[@]}"; do
+            add_allowed_ip "$ip" "silent"
+        done
+    fi
     
     # 拒绝其他所有转发请求
     log_info "配置拒绝其他IP的转发..."
@@ -210,8 +221,31 @@ add_allowed_ip() {
         return 0
     fi
     
-    # 插入到FORWARD链的第二条（第一条是ESTABLISHED,RELATED）
-    iptables -I FORWARD 2 -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
+    # 确保ESTABLISHED,RELATED规则存在
+    if ! iptables -C FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null; then
+        iptables -I FORWARD 1 -m state --state ESTABLISHED,RELATED -j ACCEPT
+    fi
+    
+    # 计算当前FORWARD链中的规则数量
+    local rule_count=$(iptables -L FORWARD -n --line-numbers | grep -c "^[0-9]")
+    
+    # 找到REJECT规则的位置（如果存在）
+    local reject_line=$(iptables -L FORWARD -n --line-numbers | grep "REJECT" | grep "$EXTERNAL_IF" | head -1 | awk '{print $1}')
+    
+    if [ -n "$reject_line" ]; then
+        # 在REJECT规则之前插入
+        iptables -I FORWARD "$reject_line" -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
+    else
+        # 在ESTABLISHED,RELATED之后追加
+        # 找到第一个不是ESTABLISHED,RELATED的位置
+        local insert_pos=2
+        if [ "$rule_count" -lt 2 ]; then
+            # 如果规则数量少于2，直接追加
+            iptables -A FORWARD -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
+        else
+            iptables -I FORWARD "$insert_pos" -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
+        fi
+    fi
     
     if [ $? -eq 0 ]; then
         if [ "$mode" != "silent" ]; then
@@ -259,6 +293,12 @@ list_allowed_ips() {
     log_info "========================================="
     log_info "当前允许转发的IP列表:"
     log_info "========================================="
+    
+    # 检查网卡
+    if ! ip link show "$INTERNAL_IF" &> /dev/null || ! ip link show "$EXTERNAL_IF" &> /dev/null; then
+        log_error "网卡不存在或未初始化"
+        return 1
+    fi
     
     # 显示网络信息
     INTERNAL_NETWORK=$(get_internal_network)
@@ -316,6 +356,11 @@ clear_snat() {
         return 0
     fi
     
+    if ! ip link show "$INTERNAL_IF" &> /dev/null || ! ip link show "$EXTERNAL_IF" &> /dev/null; then
+        log_error "网卡不存在"
+        return 1
+    fi
+    
     INTERNAL_NETWORK=$(get_internal_network)
     EXTERNAL_IP=$(get_external_ip)
     
@@ -326,10 +371,14 @@ clear_snat() {
     # 删除FORWARD规则
     log_info "删除 FORWARD 规则..."
     
-    # 删除所有与该接口相关的规则
-    while iptables -L FORWARD -n --line-numbers | grep "$EXTERNAL_IF" | grep -v "state RELATED,ESTABLISHED" | head -1 | awk '{print $1}' | xargs -I {} iptables -D FORWARD {} 2>/dev/null; do
+    # 删除所有允许转发的IP规则
+    while iptables -L FORWARD -n --line-numbers | grep "$EXTERNAL_IF" | grep ACCEPT | grep -v "state RELATED,ESTABLISHED" | head -1 | awk '{print $1}' | xargs -I {} iptables -D FORWARD {} 2>/dev/null; do
         :
     done
+    
+    # 删除REJECT和LOG规则
+    iptables -D FORWARD -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j LOG 2>/dev/null
+    iptables -D FORWARD -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j REJECT 2>/dev/null
     
     save_iptables
     log_info "SNAT 配置已清除"
@@ -358,11 +407,11 @@ ${YELLOW}示例:${NC}
     $0 init
 
     # 添加允许转发的IP
-    $0 add 192.168.1.105
-    $0 add 192.168.1.0/24
+    $0 add 192.168.80.10
+    $0 add 192.168.80.0/24
 
     # 删除IP
-    $0 del 192.168.1.105
+    $0 del 192.168.80.10
 
     # 查看允许列表
     $0 list
@@ -381,7 +430,7 @@ ${YELLOW}配置说明:${NC}
 
 ${YELLOW}注意事项:${NC}
     - 必须使用 root 权限运行
-    - 首次使用请先运行 'init' 命令
+    - 首次使用请先运行 'init' 命令初始化配置
     - 规则会自动保存并持久化
     - IP地址支持单个IP或CIDR格式的网段
 
@@ -402,6 +451,16 @@ main() {
             fi
             check_interface "$INTERNAL_IF"
             check_interface "$EXTERNAL_IF"
+            
+            # 检查是否已初始化
+            if ! check_snat_initialized; then
+                log_warn "检测到 SNAT 未初始化，建议先运行: $0 init"
+                read -p "是否继续添加IP？(y/n): " continue_add
+                if [ "$continue_add" != "y" ] && [ "$continue_add" != "Y" ]; then
+                    exit 0
+                fi
+            fi
+            
             add_allowed_ip "$2"
             ;;
         del|delete|remove)
@@ -415,8 +474,6 @@ main() {
             del_allowed_ip "$2"
             ;;
         list|ls)
-            check_interface "$INTERNAL_IF"
-            check_interface "$EXTERNAL_IF"
             list_allowed_ips
             ;;
         show|status)
