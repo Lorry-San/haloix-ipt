@@ -28,6 +28,15 @@ ens20 IP:192.168.80.38
 
 ---
 
+话又说回来了，新脚本写好了，于是事情就简单了
+
+```
+wget -O ixsnat https://raw.githubusercontent.com/Lorry-San/haloix-ipt/refs/heads/main/ixsnat && chmod +x ixsnat && ./ixsnat
+```
+
+
+---
+
 先在香港Akari配置SNAT
 
 ```
