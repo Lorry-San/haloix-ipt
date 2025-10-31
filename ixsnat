@@ -514,7 +514,7 @@ REMOTE_SCRIPT_EOF
 interactive_setup() {
     check_root
     
-    print_header "SNAT + 策略路由 一体化配置向导"
+    print_header "Halocloud IX SNAT+策略路由一键配置脚本"
     
     # 首先获取本机 ens20 IP
     check_interface "$INTERNAL_IF"
@@ -721,7 +721,7 @@ handle_list() {
 
 show_help() {
     cat << EOF
-${GREEN}SNAT + 策略路由 一体化配置脚本${NC}
+${GREEN}Halocloud IX SNAT+策略路由一键配置脚本${NC}
 
 ${YELLOW}用法:${NC}
     $0                    # 运行交互式配置向导
