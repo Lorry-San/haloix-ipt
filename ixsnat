@@ -5,6 +5,7 @@
 # 1. 配置SNAT（ens20 -> ens18）
 # 2. 远程配置策略路由（通过SSH）
 # 3. IX端ens20网关指向本机ens20 IP
+# 4. IX端路由配置持久化
 ###########################################
 
 # 颜色定义
@@ -281,67 +282,425 @@ configure_remote_policy_routing() {
     
     log_info "✅ SSH 连接测试通过"
     
-    # 生成远程执行脚本
+    # 生成远程执行脚本 - 使用文件方式避免转义问题
     log_step "生成策略路由配置脚本..."
     
-    local remote_script=$(cat << REMOTE_SCRIPT_EOF
+    # 创建临时脚本文件
+    local temp_script="/tmp/remote_policy_routing_$$.sh"
+    
+    cat > "$temp_script" << 'EOF'
 #!/bin/bash
 # 远程执行的策略路由配置脚本
-# ens20 网关将设置为: $gateway_ip
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
 NC='\033[0m'
 
 print_header() {
-    echo -e "\${BLUE}==========================================\${NC}"
-    echo -e "\${BLUE}  \$1\${NC}"
-    echo -e "\${BLUE}==========================================\${NC}"
+    echo -e "${BLUE}==========================================${NC}"
+    echo -e "${BLUE}  $1${NC}"
+    echo -e "${BLUE}==========================================${NC}"
 }
 
 print_success() {
-    echo -e "\${GREEN}   ✅ \$1\${NC}"
+    echo -e "${GREEN}   ✅ $1${NC}"
 }
 
 print_info() {
-    echo -e "\${YELLOW}   ℹ️  \$1\${NC}"
+    echo -e "${YELLOW}   ℹ️  $1${NC}"
 }
 
 print_error() {
-    echo -e "\${RED}   ❌ \$1\${NC}"
+    echo -e "${RED}   ❌ $1${NC}"
     exit 1
 }
 
 get_ip() {
-    local interface=\$1
-    ip addr show \$interface 2>/dev/null | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1 | head -n1
+    local interface=$1
+    ip addr show $interface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1
 }
 
 get_network() {
-    local interface=\$1
-    ip addr show \$interface 2>/dev/null | grep 'inet ' | awk '{print \$2}' | head -n1
+    local interface=$1
+    ip addr show $interface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1
 }
 
 get_gateway() {
-    local interface=\$1
-    ip route | grep "dev \$interface" | grep via | awk '{print \$3}' | head -n1
+    local interface=$1
+    ip route | grep "dev $interface" | grep via | awk '{print $3}' | head -n1
 }
 
 check_interface() {
-    local interface=\$1
-    if ! ip link show \$interface &>/dev/null; then
-        print_error "网卡 \$interface 不存在！"
+    local interface=$1
+    if ! ip link show $interface &>/dev/null; then
+        print_error "网卡 $interface 不存在！"
     fi
+}
+
+detect_system() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VER=$VERSION_ID
+    elif [ -f /etc/redhat-release ]; then
+        OS="rhel"
+    else
+        OS="unknown"
+    fi
+    
+    if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        NETWORK_MANAGER="NetworkManager"
+    elif systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+        NETWORK_MANAGER="systemd-networkd"
+    elif [ -f /etc/network/interfaces ]; then
+        NETWORK_MANAGER="interfaces"
+    elif [ -d /etc/sysconfig/network-scripts ]; then
+        NETWORK_MANAGER="network-scripts"
+    else
+        NETWORK_MANAGER="unknown"
+    fi
+    
+    print_info "系统: $OS, 网络管理: $NETWORK_MANAGER"
+}
+
+persist_routes() {
+    print_info "开始持久化路由配置..."
+    
+    case "$NETWORK_MANAGER" in
+        NetworkManager)
+            persist_routes_networkmanager
+            ;;
+        systemd-networkd)
+            persist_routes_systemd_networkd
+            ;;
+        interfaces)
+            persist_routes_interfaces
+            ;;
+        network-scripts)
+            persist_routes_network_scripts
+            ;;
+        *)
+            print_info "使用通用方法持久化..."
+            persist_routes_generic
+            ;;
+    esac
+}
+
+persist_routes_networkmanager() {
+    print_info "使用 NetworkManager 持久化路由..."
+    
+    mkdir -p /etc/NetworkManager/dispatcher.d
+    
+    cat > /etc/NetworkManager/dispatcher.d/99-policy-routing << 'NMSCRIPT'
+#!/bin/bash
+if [ "$2" = "up" ]; then
+    sleep 2
+    
+    IX_IP=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    IX_GATEWAY=$(ip route | grep "dev ens18" | grep via | awk '{print $3}' | head -n1)
+    ENS20_GATEWAY="__GATEWAY_IP__"
+    
+    IX_TABLE="ix_return"
+    IX_TABLE_ID="100"
+    IX_MARK="100"
+    
+    if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+        echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+    fi
+    
+    ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
+    ip rule add from $IX_IP table $IX_TABLE priority 100
+    
+    ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
+    ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+    
+    ip route flush table $IX_TABLE
+    
+    [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+    
+    for iface in ens18 ens20 ens19; do
+        if ip link show $iface &>/dev/null; then
+            NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+            SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+            [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
+        fi
+    done
+    
+    ip route del default 2>/dev/null
+    ip route add default via $ENS20_GATEWAY dev ens20
+    ip route flush cache 2>/dev/null
+fi
+NMSCRIPT
+    
+    sed -i "s/__GATEWAY_IP__/$ENS20_GATEWAY/g" /etc/NetworkManager/dispatcher.d/99-policy-routing
+    chmod +x /etc/NetworkManager/dispatcher.d/99-policy-routing
+    print_success "NetworkManager dispatcher 脚本已创建"
+}
+
+persist_routes_systemd_networkd() {
+    print_info "使用 systemd-networkd 持久化路由..."
+    
+    cat > /usr/local/bin/setup-policy-routing.sh << 'SDSCRIPT'
+#!/bin/bash
+IX_IP=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+IX_GATEWAY=$(ip route | grep "dev ens18" | grep via | awk '{print $3}' | head -n1)
+ENS20_GATEWAY="__GATEWAY_IP__"
+
+IX_TABLE="ix_return"
+IX_TABLE_ID="100"
+IX_MARK="100"
+
+if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+    echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+fi
+
+ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
+ip rule add from $IX_IP table $IX_TABLE priority 100
+
+ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
+ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+
+ip route flush table $IX_TABLE
+
+[ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+
+for iface in ens18 ens20 ens19; do
+    if ip link show $iface &>/dev/null; then
+        NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+        SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
+    fi
+done
+
+ip route del default 2>/dev/null
+ip route add default via $ENS20_GATEWAY dev ens20
+ip route flush cache 2>/dev/null
+SDSCRIPT
+
+    sed -i "s/__GATEWAY_IP__/$ENS20_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
+    chmod +x /usr/local/bin/setup-policy-routing.sh
+    
+    cat > /etc/systemd/system/policy-routing.service << 'SDSERVICE'
+[Unit]
+Description=Policy Routing Configuration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/setup-policy-routing.sh
+
+[Install]
+WantedBy=multi-user.target
+SDSERVICE
+
+    systemctl daemon-reload
+    systemctl enable policy-routing.service
+    print_success "systemd-networkd 配置已创建"
+}
+
+persist_routes_interfaces() {
+    print_info "使用 /etc/network/interfaces 持久化路由..."
+    
+    mkdir -p /etc/network/if-up.d
+    
+    cat > /etc/network/if-up.d/policy-routing << 'IFSCRIPT'
+#!/bin/bash
+if [ "$IFACE" = "ens20" ] || [ "$IFACE" = "ens18" ]; then
+    sleep 2
+    
+    IX_IP=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    IX_GATEWAY=$(ip route | grep "dev ens18" | grep via | awk '{print $3}' | head -n1)
+    ENS20_GATEWAY="__GATEWAY_IP__"
+    
+    IX_TABLE="ix_return"
+    IX_TABLE_ID="100"
+    IX_MARK="100"
+    
+    if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+        echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+    fi
+    
+    ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
+    ip rule add from $IX_IP table $IX_TABLE priority 100
+    
+    ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
+    ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+    
+    ip route flush table $IX_TABLE
+    
+    [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+    
+    for iface in ens18 ens20 ens19; do
+        if ip link show $iface &>/dev/null; then
+            NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+            SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+            [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
+        fi
+    done
+    
+    ip route del default 2>/dev/null
+    ip route add default via $ENS20_GATEWAY dev ens20
+    ip route flush cache 2>/dev/null
+fi
+IFSCRIPT
+
+    sed -i "s/__GATEWAY_IP__/$ENS20_GATEWAY/g" /etc/network/if-up.d/policy-routing
+    chmod +x /etc/network/if-up.d/policy-routing
+    print_success "/etc/network/if-up.d 脚本已创建"
+}
+
+persist_routes_network_scripts() {
+    print_info "使用 network-scripts 持久化路由..."
+    persist_routes_generic
+}
+
+persist_routes_generic() {
+    print_info "使用 rc.local 持久化路由..."
+    
+    cat > /usr/local/bin/setup-policy-routing.sh << 'RCSCRIPT'
+#!/bin/bash
+sleep 3
+
+IX_IP=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+IX_GATEWAY=$(ip route | grep "dev ens18" | grep via | awk '{print $3}' | head -n1)
+ENS20_GATEWAY="__GATEWAY_IP__"
+
+IX_TABLE="ix_return"
+IX_TABLE_ID="100"
+IX_MARK="100"
+
+if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+    echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+fi
+
+ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
+ip rule add from $IX_IP table $IX_TABLE priority 100
+
+ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
+ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+
+ip route flush table $IX_TABLE
+
+[ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+
+for iface in ens18 ens20 ens19; do
+    if ip link show $iface &>/dev/null; then
+        NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+        SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
+    fi
+done
+
+ip route del default 2>/dev/null
+ip route add default via $ENS20_GATEWAY dev ens20
+
+ip route flush cache 2>/dev/null
+logger "策略路由配置已应用"
+RCSCRIPT
+
+    sed -i "s/__GATEWAY_IP__/$ENS20_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
+    chmod +x /usr/local/bin/setup-policy-routing.sh
+    
+    if [ -f /etc/rc.local ]; then
+        if ! grep -q "setup-policy-routing.sh" /etc/rc.local; then
+            sed -i '/^exit 0/d' /etc/rc.local
+            echo "/usr/local/bin/setup-policy-routing.sh &" >> /etc/rc.local
+            echo "exit 0" >> /etc/rc.local
+        fi
+        chmod +x /etc/rc.local
+    else
+        cat > /etc/rc.local << 'RCLOCALFILE'
+#!/bin/bash
+/usr/local/bin/setup-policy-routing.sh &
+exit 0
+RCLOCALFILE
+        chmod +x /etc/rc.local
+    fi
+    
+    if command -v systemctl &>/dev/null; then
+        cat > /etc/systemd/system/rc-local.service << 'RCLOCALSERVICE'
+[Unit]
+Description=/etc/rc.local Compatibility
+ConditionPathExists=/etc/rc.local
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local start
+TimeoutSec=0
+StandardOutput=tty
+RemainAfterExit=yes
+SysVStartPriority=99
+
+[Install]
+WantedBy=multi-user.target
+RCLOCALSERVICE
+        
+        systemctl daemon-reload
+        systemctl enable rc-local.service 2>/dev/null
+    fi
+    
+    print_success "rc.local 配置已创建"
+}
+
+persist_iptables() {
+    print_info "持久化 iptables 规则..."
+    
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
+    
+    if command -v systemctl &>/dev/null; then
+        if ! systemctl list-unit-files | grep -q "iptables-persistent\|netfilter-persistent"; then
+            cat > /etc/systemd/system/iptables-restore.service << 'IPTSERVICE'
+[Unit]
+Description=Restore iptables rules
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/iptables/rules.v4
+
+[Install]
+WantedBy=multi-user.target
+IPTSERVICE
+            
+            systemctl daemon-reload
+            systemctl enable iptables-restore.service 2>/dev/null
+        fi
+    fi
+    
+    print_success "iptables 规则已持久化"
+}
+
+persist_sysctl() {
+    print_info "持久化 sysctl 配置..."
+    
+    cat > /etc/sysctl.d/99-policy-routing.conf << 'SYSCTLCONF'
+net.ipv4.conf.ens18.rp_filter=2
+net.ipv4.conf.ens20.rp_filter=2
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.ip_forward=1
+SYSCTLCONF
+    
+    sysctl -p /etc/sysctl.d/99-policy-routing.conf > /dev/null 2>&1
+    print_success "sysctl 配置已持久化"
 }
 
 configure_policy_routing() {
     print_header "开始配置策略路由"
     
-    if [ "\$EUID" -ne 0 ]; then 
+    if [ "$EUID" -ne 0 ]; then 
         print_error "需要 root 权限"
     fi
+    
+    detect_system
     
     echo ""
     echo "【步骤1】检查网卡..."
@@ -360,40 +719,39 @@ configure_policy_routing() {
     
     echo ""
     echo "【步骤2】读取 ens18 (IX) 配置..."
-    IX_IP=\$(get_ip "ens18")
-    [ -z "\$IX_IP" ] && print_error "无法读取 ens18 的 IP 地址！"
-    print_success "IX IP: \$IX_IP"
+    IX_IP=$(get_ip "ens18")
+    [ -z "$IX_IP" ] && print_error "无法读取 ens18 的 IP 地址！"
+    print_success "IX IP: $IX_IP"
     
-    IX_GATEWAY=\$(get_gateway "ens18")
-    if [ -z "\$IX_GATEWAY" ]; then
-        IX_NETWORK=\$(ip addr show ens18 | grep 'inet ' | awk '{print \$2}' | head -n1)
-        IX_GATEWAY=\$(echo \$IX_NETWORK | awk -F'.' '{print \$1"."\$2"."\$3".1"}')
-        print_info "自动推算网关: \$IX_GATEWAY"
+    IX_GATEWAY=$(get_gateway "ens18")
+    if [ -z "$IX_GATEWAY" ]; then
+        IX_NETWORK=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+        IX_GATEWAY=$(echo $IX_NETWORK | awk -F'.' '{print $1"."$2"."$3".1"}')
+        print_info "自动推算网关: $IX_GATEWAY"
     else
-        print_success "检测到网关: \$IX_GATEWAY"
+        print_success "检测到网关: $IX_GATEWAY"
     fi
     
-    ENS18_NETWORK=\$(get_network "ens18")
-    print_success "IX 网段: \$ENS18_NETWORK"
+    ENS18_NETWORK=$(get_network "ens18")
+    print_success "IX 网段: $ENS18_NETWORK"
     
     echo ""
     echo "【步骤3】读取 ens20 配置..."
-    ENS20_IP=\$(get_ip "ens20")
-    ENS20_NETWORK=\$(get_network "ens20")
-    print_success "ens20 IP: \$ENS20_IP"
-    print_success "ens20 网段: \$ENS20_NETWORK"
+    ENS20_IP=$(get_ip "ens20")
+    ENS20_NETWORK=$(get_network "ens20")
+    print_success "ens20 IP: $ENS20_IP"
+    print_success "ens20 网段: $ENS20_NETWORK"
     
-    # 使用传入的网关 IP（本机 ens20 IP）
-    ENS20_GATEWAY="$gateway_ip"
-    print_success "ens20 Gateway: \$ENS20_GATEWAY (SNAT 服务器)"
+    ENS20_GATEWAY="__GATEWAY_IP__"
+    print_success "ens20 Gateway: $ENS20_GATEWAY (SNAT 服务器)"
     
-    if [ "\$HAS_ENS19" = true ]; then
+    if [ "$HAS_ENS19" = true ]; then
         echo ""
         echo "【步骤4】读取 ens19 配置..."
-        ENS19_IP=\$(get_ip "ens19")
-        ENS19_NETWORK=\$(get_network "ens19")
-        print_success "ens19 IP: \$ENS19_IP"
-        print_success "ens19 网段: \$ENS19_NETWORK"
+        ENS19_IP=$(get_ip "ens19")
+        ENS19_NETWORK=$(get_network "ens19")
+        print_success "ens19 IP: $ENS19_IP"
+        print_success "ens19 网段: $ENS19_NETWORK"
     fi
     
     IX_TABLE="ix_return"
@@ -402,54 +760,54 @@ configure_policy_routing() {
     
     echo ""
     echo "【步骤5】创建路由表..."
-    if ! grep -q "\$IX_TABLE" /etc/iproute2/rt_tables; then
-        echo "\$IX_TABLE_ID \$IX_TABLE" >> /etc/iproute2/rt_tables
-        print_success "路由表 \$IX_TABLE 已创建"
+    if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+        echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+        print_success "路由表 $IX_TABLE 已创建"
     else
-        print_info "路由表 \$IX_TABLE 已存在"
+        print_info "路由表 $IX_TABLE 已存在"
     fi
     
     echo ""
     echo "【步骤6】清理现有路由配置..."
-    ip route del default via \$IX_GATEWAY dev ens18 2>/dev/null
-    while ip rule del from \$IX_IP table \$IX_TABLE 2>/dev/null; do :; done
-    while ip rule del fwmark \$IX_MARK table \$IX_TABLE 2>/dev/null; do :; done
-    ip route flush table \$IX_TABLE
+    ip route del default via $IX_GATEWAY dev ens18 2>/dev/null
+    while ip rule del from $IX_IP table $IX_TABLE 2>/dev/null; do :; done
+    while ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null; do :; done
+    ip route flush table $IX_TABLE
     print_success "旧配置已清理"
     
     echo ""
     echo "【步骤7】配置新路由..."
     ip route del default 2>/dev/null
-    ip route add default via \$ENS20_GATEWAY dev ens20
-    print_success "默认路由: ens20 -> \$ENS20_GATEWAY"
+    ip route add default via $ENS20_GATEWAY dev ens20
+    print_success "默认路由: ens20 -> $ENS20_GATEWAY"
     
-    ip route add default via \$IX_GATEWAY dev ens18 table \$IX_TABLE
-    print_success "IX 回程默认路由: ens18 -> \$IX_GATEWAY"
+    ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+    print_success "IX 回程默认路由: ens18 -> $IX_GATEWAY"
     
-    ip route add \$ENS18_NETWORK dev ens18 src \$IX_IP table \$IX_TABLE
-    print_success "添加路由: \$ENS18_NETWORK via ens18"
+    ip route add $ENS18_NETWORK dev ens18 src $IX_IP table $IX_TABLE
+    print_success "添加路由: $ENS18_NETWORK via ens18"
     
-    ip route add \$ENS20_NETWORK dev ens20 src \$ENS20_IP table \$IX_TABLE
-    print_success "添加路由: \$ENS20_NETWORK via ens20"
+    ip route add $ENS20_NETWORK dev ens20 src $ENS20_IP table $IX_TABLE
+    print_success "添加路由: $ENS20_NETWORK via ens20"
     
-    if [ "\$HAS_ENS19" = true ] && [ -n "\$ENS19_IP" ]; then
-        ip route add \$ENS19_NETWORK dev ens19 src \$ENS19_IP table \$IX_TABLE
-        print_success "添加路由: \$ENS19_NETWORK via ens19"
+    if [ "$HAS_ENS19" = true ] && [ -n "$ENS19_IP" ]; then
+        ip route add $ENS19_NETWORK dev ens19 src $ENS19_IP table $IX_TABLE
+        print_success "添加路由: $ENS19_NETWORK via ens19"
     fi
     
     echo ""
     echo "【步骤8】添加策略路由规则..."
-    ip rule add from \$IX_IP table \$IX_TABLE priority 100
-    print_success "规则: from \$IX_IP use table \$IX_TABLE (priority 100)"
+    ip rule add from $IX_IP table $IX_TABLE priority 100
+    print_success "规则: from $IX_IP use table $IX_TABLE (priority 100)"
     
-    ip rule add fwmark \$IX_MARK table \$IX_TABLE priority 99
-    print_success "规则: fwmark \$IX_MARK use table \$IX_TABLE (priority 99)"
+    ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+    print_success "规则: fwmark $IX_MARK use table $IX_TABLE (priority 99)"
     
     echo ""
     echo "【步骤9】配置 iptables 连接跟踪..."
-    iptables -t mangle -D PREROUTING -i ens18 -j CONNMARK --set-mark \$IX_MARK 2>/dev/null
+    iptables -t mangle -D PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK 2>/dev/null
     iptables -t mangle -D OUTPUT -j CONNMARK --restore-mark 2>/dev/null
-    iptables -t mangle -A PREROUTING -i ens18 -j CONNMARK --set-mark \$IX_MARK
+    iptables -t mangle -A PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK
     iptables -t mangle -A OUTPUT -j CONNMARK --restore-mark
     print_success "连接跟踪已配置"
     
@@ -464,45 +822,50 @@ configure_policy_routing() {
     print_success "路由缓存已刷新"
     
     echo ""
-    echo "【步骤11】保存配置..."
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules.v4
-    print_success "iptables 规则已保存"
+    echo "【步骤11】持久化配置..."
+    persist_sysctl
+    persist_iptables
+    persist_routes
+    print_success "所有配置已持久化"
     
     echo ""
     print_header "策略路由配置完成！"
     echo ""
-    echo " 网卡配置："
-    echo "   • ens18 (IX): \$IX_IP / \$ENS18_NETWORK -> \$IX_GATEWAY"
-    echo "   • ens20: \$ENS20_IP / \$ENS20_NETWORK -> \$ENS20_GATEWAY (SNAT服务器)"
-    [ "\$HAS_ENS19" = true ] && echo "   • ens19: \$ENS19_IP / \$ENS19_NETWORK"
+    echo "📌 网卡配置："
+    echo "   • ens18 (IX): $IX_IP / $ENS18_NETWORK -> $IX_GATEWAY"
+    echo "   • ens20: $ENS20_IP / $ENS20_NETWORK -> $ENS20_GATEWAY (SNAT服务器)"
+    [ "$HAS_ENS19" = true ] && echo "   • ens19: $ENS19_IP / $ENS19_NETWORK"
     echo ""
-    echo " 路由策略："
-    echo "   • 默认出站: ens20 -> \$ENS20_GATEWAY (通过SNAT服务器)"
-    echo "   • IX 回程: ens18 -> \$IX_GATEWAY"
+    echo "📌 路由策略："
+    echo "   • 默认出站: ens20 -> $ENS20_GATEWAY (通过SNAT服务器)"
+    echo "   • IX 回程: ens18 -> $IX_GATEWAY"
     echo ""
-    echo " 重要提示："
-    echo "   • ens20 的网关指向 SNAT 服务器 (\$ENS20_GATEWAY)"
-    echo "   • 所有主动发起的连接会通过 SNAT 服务器转发"
-    echo "   • IX 流量会从 ens18 原路返回"
+    echo "📌 持久化方式："
+    echo "   • 系统: $OS"
+    echo "   • 网络管理: $NETWORK_MANAGER"
+    echo "   • 配置已在系统重启后自动生效"
     echo ""
 }
 
 configure_policy_routing
-REMOTE_SCRIPT_EOF
-)
+EOF
+
+    # 替换网关占位符
+    sed -i "s/__GATEWAY_IP__/$gateway_ip/g" "$temp_script"
     
     # 执行远程配置
     log_step "执行远程策略路由配置..."
     echo ""
     
-    if sshpass -p "$remote_password" ssh -o StrictHostKeyChecking=no -p $ssh_port ${ssh_user}@${remote_ip} "bash -s" <<< "$remote_script" 2>&1; then
+    if sshpass -p "$remote_password" ssh -o StrictHostKeyChecking=no -p $ssh_port ${ssh_user}@${remote_ip} "bash -s" < "$temp_script" 2>&1; then
         echo ""
         log_info "✅ 远程策略路由配置成功！"
+        rm -f "$temp_script"
         return 0
     else
         echo ""
         log_error "远程配置失败！"
+        rm -f "$temp_script"
         return 1
     fi
 }
@@ -514,7 +877,7 @@ REMOTE_SCRIPT_EOF
 interactive_setup() {
     check_root
     
-    print_header "Halocloud IX SNAT+策略路由一键配置脚本"
+    print_header "Halocloud IX SNAT + 策略路由一键配置脚本"
     
     # 首先获取本机 ens20 IP
     check_interface "$INTERNAL_IF"
@@ -573,7 +936,7 @@ interactive_setup() {
     echo -e "  ${YELLOW}远程 IX 服务器:${NC}"
     echo "    IP: $IX_SERVER_IP"
     echo "    ens20 网关将设置为: ${GREEN}$LOCAL_ENS20_IP${NC} (本机)"
-    echo "    将配置策略路由"
+    echo "    将配置策略路由并持久化"
     echo ""
     echo -e "  ${YELLOW}允许转发的 IP 列表:${NC}"
     for ip in "${ALLOWED_IPS[@]}"; do
@@ -586,6 +949,10 @@ interactive_setup() {
     echo ""
     echo -e "  ${YELLOW}网络拓扑:${NC}"
     echo "    IX Server (ens20) -> $LOCAL_ENS20_IP (本机 ens20) -> 公网 (ens18)"
+    echo ""
+    echo -e "  ${YELLOW}持久化配置:${NC}"
+    echo "    • IX 端路由规则将在重启后自动恢复"
+    echo "    • 本地 SNAT 规则将在重启后自动恢复"
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
@@ -614,14 +981,15 @@ interactive_setup() {
     
     # 2. 配置远程策略路由（传入本机 ens20 IP 作为网关）
     echo ""
-    log_step "【阶段 2/2】配置远程策略路由..."
+    log_step "【阶段 2/2】配置远程策略路由并持久化..."
     echo ""
     
     if configure_remote_policy_routing "$IX_SERVER_IP" "$IX_SERVER_PASSWORD" "$LOCAL_ENS20_IP"; then
-        print_header " 全部配置完成！"
+        print_header "🎉 全部配置完成！"
         echo ""
-        echo -e "${GREEN} 本地 SNAT 配置成功${NC}"
-        echo -e "${GREEN} 远程策略路由配置成功${NC}"
+        echo -e "${GREEN}✅ 本地 SNAT 配置成功${NC}"
+        echo -e "${GREEN}✅ 远程策略路由配置成功${NC}"
+        echo -e "${GREEN}✅ 所有配置已持久化${NC}"
         echo ""
         echo -e "${CYAN}配置详情:${NC}"
         echo "  • 本机 ens20 IP: $LOCAL_ENS20_IP"
@@ -633,9 +1001,14 @@ interactive_setup() {
         echo "  ${YELLOW}主动出站:${NC} IX Server -> 本机 ens20 ($LOCAL_ENS20_IP) -> SNAT -> 公网 (ens18)"
         echo "  ${YELLOW}IX 回程:${NC} 公网 -> IX Server ens18 -> 原路返回"
         echo ""
+        echo -e "${CYAN}持久化状态:${NC}"
+        echo "  ${GREEN}✓${NC} 本地 iptables 规则已保存"
+        echo "  ${GREEN}✓${NC} 远程路由规则已配置开机自启"
+        echo "  ${GREEN}✓${NC} 系统重启后自动恢复配置"
+        echo ""
         echo -e "${YELLOW}注意事项:${NC}"
         echo "  • 所有配置已自动保存并持久化"
-        echo "  • IX 端 ens20 网关指向本机: $LOCAL_ENS20_IP"
+        echo "  • IX 端支持多种网络管理器（NetworkManager/systemd-networkd/interfaces等）"
         echo "  • 如需添加更多 IP，请使用: $0 add <IP>"
         echo ""
     else
@@ -721,7 +1094,7 @@ handle_list() {
 
 show_help() {
     cat << EOF
-${GREEN}Halocloud IX SNAT+策略路由一键配置脚本${NC}
+${GREEN}SNAT + 策略路由 一体化配置脚本 (带持久化)${NC}
 
 ${YELLOW}用法:${NC}
     $0                    # 运行交互式配置向导
@@ -740,43 +1113,32 @@ ${YELLOW}配置向导包含:${NC}
     3. 可选添加其他允许转发的 IP
     4. 自动配置本地 SNAT
     5. 自动配置远程策略路由
-    ${GREEN}6. IX 端 ens20 网关自动设置为本机 ens20 IP${NC}
+    6. IX 端 ens20 网关自动设置为本机 ens20 IP
+    ${GREEN}7. 所有配置自动持久化（重启后自动恢复）${NC}
+
+${YELLOW}持久化支持:${NC}
+    • NetworkManager (Ubuntu 18+, CentOS 8+)
+    • systemd-networkd (现代 Linux)
+    • /etc/network/interfaces (Debian/Ubuntu)
+    • network-scripts (CentOS/RHEL 7)
+    • rc.local (通用兜底方案)
 
 ${YELLOW}网络拓扑:${NC}
     IX Server (ens20) -> 本机 ens20 IP -> SNAT -> 公网 (ens18)
-    
-    本机 ens20 IP 作为 IX 端的默认网关
 
 ${YELLOW}示例:${NC}
     # 首次使用 - 运行完整配置向导
     $0
-    或
-    $0 setup
     
-    # 之后添加更多允许的 IP
+    # 添加更多允许的 IP
     $0 add 192.168.1.105
-    $0 add 192.168.1.0/24
-    
-    # 删除 IP
-    $0 del 192.168.1.105
     
     # 查看允许列表
     $0 list
 
-${YELLOW}网络接口:${NC}
-    内网接口: $INTERNAL_IF
-    外网接口: $EXTERNAL_IF
-
 ${YELLOW}前置要求:${NC}
     • 必须使用 root 权限运行
     • 需要安装 sshpass: apt install sshpass
-
-${YELLOW}功能说明:${NC}
-    • IX IP 会自动添加到 SNAT 允许列表
-    • IX 端 ens20 网关自动指向本机 ens20 IP
-    • 支持单个 IP 和 CIDR 格式的网段
-    • 所有配置自动保存并持久化
-    • 远程配置通过 SSH 自动完成
 EOF
 }
 
@@ -785,8 +1147,6 @@ EOF
 ###########################################
 
 main() {
-	apt install sshpass -y >> /dev/null
-	
     case "${1:-setup}" in
         setup|init|config|configure)
             interactive_setup
