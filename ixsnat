@@ -1,7 +1,7 @@
 #!/bin/bash
 ###########################################
 # SNAT + 策略路由 一体化配置脚本
-# 修复版：改进密码处理和 SSH 测试
+# 简化版：仅检查网络和端口，不测试SSH连接
 ###########################################
 
 # 颜色定义
@@ -114,59 +114,66 @@ save_iptables() {
 }
 
 ###########################################
-# SSH 连接测试增强函数（修复版）
+# 简化的网络检查函数
 ###########################################
 
-test_ssh_connection() {
+check_network_connectivity() {
     local remote_ip="$1"
-    local remote_password="$2"
-    local ssh_port="${3:-22}"
-    local ssh_user="${4:-root}"
+    local ssh_port="${2:-22}"
     
-    print_header "SSH 连接诊断"
+    print_header "网络连通性检查"
     
     # 1. 检查 sshpass 工具
-    echo -e "${BLUE}[检查 1/6]${NC} 检查必要工具..."
+    echo -e "${BLUE}[检查 1/3]${NC} 检查必要工具..."
     if ! command -v sshpass &> /dev/null; then
         log_error "未安装 sshpass 工具"
         echo ""
         echo -e "${YELLOW}请先安装 sshpass：${NC}"
         echo "  Debian/Ubuntu: apt install sshpass"
         echo "  CentOS/RHEL:   yum install sshpass"
-        echo "  macOS:         brew install hudochenkov/sshpass/sshpass"
+        echo ""
         return 1
     fi
     log_info "✓ sshpass 已安装"
     
     # 2. 检查 IP 地址可达性
     echo ""
-    echo -e "${BLUE}[检查 2/6]${NC} 测试 IP 可达性..."
-    if ping -c 2 -W 2 "$remote_ip" &>/dev/null; then
+    echo -e "${BLUE}[检查 2/3]${NC} 测试 IP 可达性..."
+    if ping -c 2 -W 3 "$remote_ip" &>/dev/null; then
         log_info "✓ IP 地址 $remote_ip 可达 (ICMP)"
     else
-        log_warn "⚠ IP 地址 $remote_ip ICMP 不通（可能防火墙阻止 ping）"
-        echo "    继续测试 SSH 端口..."
+        log_warn "⚠ IP 地址 $remote_ip ICMP 不通"
+        echo ""
+        echo -e "${YELLOW}可能的原因：${NC}"
+        echo "  1. 目标主机防火墙阻止 ICMP"
+        echo "  2. 网络路由问题"
+        echo "  3. IP 地址错误"
+        echo ""
+        echo -e "${CYAN}提示：${NC}即使 ping 不通，SSH 可能仍然可用，将继续检查..."
+        echo ""
     fi
     
     # 3. 检查 SSH 端口是否开放
     echo ""
-    echo -e "${BLUE}[检查 3/6]${NC} 测试 SSH 端口 ($ssh_port) 可达性..."
-    local port_status=""
+    echo -e "${BLUE}[检查 3/3]${NC} 测试 SSH 端口 ($ssh_port) 可达性..."
+    local port_status="unknown"
     
+    # 尝试多种端口检测方法
     if command -v nc &> /dev/null; then
-        if timeout 3 nc -zv "$remote_ip" "$ssh_port" 2>&1 | grep -q "succeeded\|open"; then
+        if timeout 5 nc -zv "$remote_ip" "$ssh_port" 2>&1 | grep -q "succeeded\|open"; then
             port_status="open"
         else
             port_status="closed"
         fi
     elif command -v telnet &> /dev/null; then
-        if timeout 3 bash -c "echo '' | telnet $remote_ip $ssh_port 2>&1" | grep -q "Connected\|Escape"; then
+        if timeout 5 bash -c "echo '' | telnet $remote_ip $ssh_port 2>&1" | grep -q "Connected\|Escape"; then
             port_status="open"
         else
             port_status="closed"
         fi
     else
-        if timeout 3 bash -c "cat < /dev/null > /dev/tcp/$remote_ip/$ssh_port" 2>/dev/null; then
+        # 使用 bash 内置的 /dev/tcp
+        if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$remote_ip/$ssh_port" 2>/dev/null; then
             port_status="open"
         else
             port_status="closed"
@@ -175,6 +182,11 @@ test_ssh_connection() {
     
     if [ "$port_status" = "open" ]; then
         log_info "✓ SSH 端口 $ssh_port 已开放"
+        echo ""
+        log_info "网络连通性检查通过，准备进行配置..."
+        echo ""
+        return 0
+        
     elif [ "$port_status" = "closed" ]; then
         log_error "✗ SSH 端口 $ssh_port 无法访问"
         echo ""
@@ -184,236 +196,56 @@ test_ssh_connection() {
         echo "  3. SSH 监听在不同的端口"
         echo "  4. 网络路由问题"
         echo ""
-        echo -e "${YELLOW}建议检查：${NC}"
-        echo "  在远程服务器上运行："
+        echo -e "${YELLOW}建议检查（在远程服务器上）：${NC}"
+        echo "  • 检查 SSH 服务状态:"
         echo "    systemctl status sshd"
+        echo ""
+        echo "  • 检查端口监听:"
         echo "    ss -tlnp | grep :$ssh_port"
+        echo "    netstat -tlnp | grep :$ssh_port"
+        echo ""
+        echo "  • 检查防火墙:"
         echo "    iptables -L -n | grep $ssh_port"
-        return 1
-    else
-        log_warn "⚠ 无法确定端口状态，继续尝试..."
-    fi
-    
-    # 4. 测试 SSH 协议握手
-    echo ""
-    echo -e "${BLUE}[检查 4/6]${NC} 测试 SSH 协议握手..."
-    local ssh_banner=$(timeout 5 ssh -o BatchMode=yes -o ConnectTimeout=3 -p "$ssh_port" "${ssh_user}@${remote_ip}" 2>&1)
-    
-    if echo "$ssh_banner" | grep -qi "Permission denied"; then
-        log_info "✓ SSH 服务正常响应（需要认证）"
-    elif echo "$ssh_banner" | grep -qi "Connection refused"; then
-        log_error "✗ SSH 连接被拒绝"
-        echo ""
-        echo -e "${YELLOW}可能的原因：${NC}"
-        echo "  1. SSH 服务未运行"
-        echo "  2. 端口配置错误"
-        return 1
-    elif echo "$ssh_banner" | grep -qi "Connection timed out\|No route to host"; then
-        log_error "✗ 连接超时或无路由"
-        echo ""
-        echo -e "${YELLOW}可能的原因：${NC}"
-        echo "  1. IP 地址不可达"
-        echo "  2. 防火墙阻止"
-        echo "  3. 网络配置问题"
-        return 1
-    elif echo "$ssh_banner" | grep -qi "Host key verification failed"; then
-        log_info "✓ SSH 服务正常响应（主机密钥问题）"
-    else
-        log_debug "SSH 协议响应: $(echo "$ssh_banner" | head -1)"
-    fi
-    
-    # 5. 测试无密码连接（检查是否有密钥认证）
-    echo ""
-    echo -e "${BLUE}[检查 5/6]${NC} 测试密钥认证..."
-    if ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no \
-           -p "$ssh_port" "${ssh_user}@${remote_ip}" "echo 'SSH 连接成功'" 2>/dev/null; then
-        log_info "✓ 密钥认证成功（无需密码）"
-        return 0
-    else
-        log_info "○ 密钥认证不可用，需要密码认证"
-    fi
-    
-    # 6. 测试密码认证（改进版）
-    echo ""
-    echo -e "${BLUE}[检查 6/6]${NC} 测试密码认证..."
-    
-    # 创建临时密码文件（更安全的方式）
-    local temp_pass_file=$(mktemp)
-    chmod 600 "$temp_pass_file"
-    echo "$remote_password" > "$temp_pass_file"
-    
-    # 尝试多种方式连接
-    local ssh_result=1
-    local ssh_output=""
-    
-    # 方法1: 使用 sshpass -f（从文件读取密码）
-    ssh_output=$(SSHPASS="$remote_password" sshpass -e ssh \
-        -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o PreferredAuthentications=password \
-        -o PubkeyAuthentication=no \
-        -o NumberOfPasswordPrompts=1 \
-        -p "$ssh_port" \
-        "${ssh_user}@${remote_ip}" \
-        "echo 'SSH 连接成功'" 2>&1)
-    
-    ssh_result=$?
-    
-    # 清理临时文件
-    rm -f "$temp_pass_file"
-    
-    # 分析返回码和输出
-    if [ $ssh_result -eq 0 ] && echo "$ssh_output" | grep -q "SSH 连接成功"; then
-        log_info "✅ 密码认证成功！"
-        echo ""
-        return 0
-    else
-        log_error "✗ 密码认证失败"
+        echo "    firewall-cmd --list-all"
         echo ""
         
-        # 详细错误分析
-        echo -e "${YELLOW}错误分析：${NC}"
-        
-        # 显示实际的错误输出（调试用）
-        if [ -n "$ssh_output" ]; then
-            log_debug "SSH 输出: $(echo "$ssh_output" | head -3)"
-        fi
-        
-        if echo "$ssh_output" | grep -qi "Permission denied\|Authentication failed"; then
-            echo -e "${RED}► 密码错误或认证失败${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. 输入的密码不正确"
-            echo "  2. 用户 '$ssh_user' 不存在或被禁用"
-            echo "  3. SSH 配置禁止密码登录"
-            echo "  4. 密码包含特殊字符（需要转义）"
-            echo ""
-            echo "建议操作："
-            echo "  1. 确认密码是否正确（注意大小写）"
-            echo "  2. 检查远程服务器 /etc/ssh/sshd_config："
-            echo "     PasswordAuthentication yes"
-            echo "     PermitRootLogin yes  (如果用户是 root)"
-            echo "     UsePAM yes"
-            echo "  3. 重启 SSH 服务: systemctl restart sshd"
-            echo "  4. 查看认证日志: tail -f /var/log/auth.log"
-            
-        elif echo "$ssh_output" | grep -qi "Connection refused"; then
-            echo -e "${RED}► 连接被拒绝${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. SSH 服务未运行"
-            echo "  2. 端口 $ssh_port 不正确"
-            echo ""
-            echo "建议操作："
-            echo "  在远程服务器运行："
-            echo "    systemctl start sshd"
-            echo "    systemctl enable sshd"
-            
-        elif echo "$ssh_output" | grep -qi "Connection timed out"; then
-            echo -e "${RED}► 连接超时${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. 防火墙阻止了 SSH 连接"
-            echo "  2. 网络不通"
-            echo "  3. IP 地址错误"
-            echo ""
-            echo "建议操作："
-            echo "  1. 检查防火墙规则"
-            echo "  2. ping $remote_ip"
-            echo "  3. 确认 IP 地址正确"
-            
-        elif echo "$ssh_output" | grep -qi "Network is unreachable\|No route to host"; then
-            echo -e "${RED}► 网络不可达${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. IP 地址不在同一网段"
-            echo "  2. 路由配置问题"
-            echo "  3. 网关配置错误"
-            echo ""
-            echo "建议操作："
-            echo "  1. 检查 IP 地址和网段"
-            echo "  2. ip route get $remote_ip"
-            echo "  3. 检查网关配置"
-            
-        elif echo "$ssh_output" | grep -qi "Too many authentication failures"; then
-            echo -e "${RED}► 认证尝试次数过多${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. 多次密码错误导致暂时锁定"
-            echo "  2. SSH 配置限制了尝试次数"
-            echo ""
-            echo "建议操作："
-            echo "  1. 等待几分钟后重试"
-            echo "  2. 检查 /etc/ssh/sshd_config 的 MaxAuthTries"
-            
-        elif echo "$ssh_output" | grep -qi "Host key verification failed"; then
-            echo -e "${RED}► 主机密钥验证失败${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. 远程主机密钥已更改"
-            echo "  2. 可能存在中间人攻击"
-            echo ""
-            echo "建议操作："
-            echo "  1. 删除旧的主机密钥："
-            echo "     ssh-keygen -R $remote_ip"
-            echo "  2. 或编辑 ~/.ssh/known_hosts"
-            
-        elif echo "$ssh_output" | grep -qi "Could not resolve hostname"; then
-            echo -e "${RED}► 无法解析主机名${NC}"
-            echo ""
-            echo "可能的原因："
-            echo "  1. DNS 解析失败"
-            echo "  2. 主机名错误"
-            echo ""
-            echo "建议操作："
-            echo "  1. 使用 IP 地址而非主机名"
-            echo "  2. 检查 DNS 配置"
-            
+        read -p "端口检测失败，是否仍要继续尝试配置？(y/n) [n]: " continue_anyway
+        if [[ "$continue_anyway" =~ ^[Yy]$ ]]; then
+            log_warn "用户选择继续配置..."
+            return 0
         else
-            echo -e "${RED}► 未知错误${NC}"
-            echo ""
-            echo "详细错误信息："
-            echo "$ssh_output" | head -10
-            echo ""
-            echo "返回码: $ssh_result"
+            return 1
         fi
         
+    else
+        log_warn "⚠ 无法确定端口状态"
         echo ""
-        echo -e "${CYAN}===============================================================${NC}"
-        echo -e "${CYAN}  诊断摘要${NC}"
-        echo -e "${CYAN}===============================================================${NC}"
-        echo "目标地址: ${ssh_user}@${remote_ip}:${ssh_port}"
-        echo "认证方式: 密码认证"
-        echo "连接状态: 失败"
+        echo -e "${CYAN}提示：${NC}端口检测工具不可用或检测失败，但这不一定意味着 SSH 不可用"
         echo ""
-        
-        # 提供手动测试命令
-        echo -e "${YELLOW}手动测试命令：${NC}"
-        echo "  ssh -v ${ssh_user}@${remote_ip} -p ${ssh_port}"
-        echo ""
-        
-        return 1
+        read -p "是否继续尝试配置？(y/n) [y]: " continue_anyway
+        continue_anyway=${continue_anyway:-y}
+        if [[ "$continue_anyway" =~ ^[Yy]$ ]]; then
+            return 0
+        else
+            return 1
+        fi
     fi
 }
 
-# 重试机制（改进版）
-retry_ssh_connection() {
+# 输入密码函数
+get_ssh_password() {
     local remote_ip="$1"
-    local ssh_port="${2:-22}"
-    local ssh_user="${3:-root}"
     local max_retries=3
     local retry_count=0
     
     while [ $retry_count -lt $max_retries ]; do
-        echo ""
         if [ $retry_count -gt 0 ]; then
+            echo ""
             echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-            echo -e "${YELLOW}第 $((retry_count + 1)) 次尝试 (共 $max_retries 次)${NC}"
+            echo -e "${YELLOW}第 $((retry_count + 1)) 次输入 (共 $max_retries 次机会)${NC}"
             echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         fi
         
-        # 使用 -s 选项隐藏输入，-p 提示符
         read -s -p "请输入 SSH 密码: " remote_password
         echo ""
         
@@ -423,33 +255,22 @@ retry_ssh_connection() {
             continue
         fi
         
-        # 测试连接
-        if test_ssh_connection "$remote_ip" "$remote_password" "$ssh_port" "$ssh_user"; then
-            # 成功，返回密码
-            echo "$remote_password"
-            return 0
+        # 确认密码
+        read -s -p "请再次输入密码确认: " remote_password_confirm
+        echo ""
+        
+        if [ "$remote_password" != "$remote_password_confirm" ]; then
+            log_error "两次输入的密码不一致！"
+            retry_count=$((retry_count + 1))
+            continue
         fi
         
-        retry_count=$((retry_count + 1))
-        
-        if [ $retry_count -lt $max_retries ]; then
-            echo ""
-            read -p "是否重试？(y/n) [y]: " retry
-            retry=${retry:-y}
-            if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-                return 1
-            fi
-        fi
+        echo "$remote_password"
+        return 0
     done
     
     echo ""
-    log_error "已达到最大重试次数 ($max_retries)"
-    echo ""
-    echo -e "${YELLOW}如果确定密码正确，请检查：${NC}"
-    echo "  1. 远程服务器 SSH 配置是否允许密码登录"
-    echo "  2. 用户是否被锁定或禁用"
-    echo "  3. 是否有防火墙或安全策略限制"
-    echo ""
+    log_error "密码输入失败次数过多"
     return 1
 }
 
@@ -584,44 +405,411 @@ configure_remote_policy_routing() {
     local ssh_port=22
     local ssh_user="root"
     
-    log_step "验证 SSH 连接..."
-    
-    # 快速验证连接（不显示详细诊断）
-    local temp_log=$(mktemp)
-    SSHPASS="$remote_password" sshpass -e ssh \
-        -o ConnectTimeout=10 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o PreferredAuthentications=password \
-        -o PubkeyAuthentication=no \
-        -p "$ssh_port" \
-        "${ssh_user}@${remote_ip}" \
-        "echo 'OK'" > "$temp_log" 2>&1
-    
-    local test_result=$?
-    rm -f "$temp_log"
-    
-    if [ $test_result -ne 0 ]; then
-        log_error "SSH 连接验证失败"
-        return 1
-    fi
-    
-    log_info "✅ SSH 连接验证通过"
-    
     log_step "生成策略路由配置脚本..."
     
     local temp_script="/tmp/remote_policy_routing_$$.sh"
     
-    # 这里是完整的远程脚本（与之前相同，省略以节省空间）
-    # ... 省略远程脚本内容 ...
-    
     cat > "$temp_script" << 'EOF'
 #!/bin/bash
-# 远程策略路由配置脚本
-echo "策略路由配置脚本执行中..."
-# 这里应该是完整的远程配置脚本
-# 为了节省篇幅，这里只是示例
+# 远程执行的策略路由配置脚本
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+NC='\033[0m'
+
+print_header() {
+    echo -e "${BLUE}==============================================================${NC}"
+    echo -e "${BLUE}  $1${NC}"
+    echo -e "${BLUE}==============================================================${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}   ✅ $1${NC}"
+}
+
+print_info() {
+    echo -e "${YELLOW}   ℹ️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}   ❌ $1${NC}"
+    exit 1
+}
+
+get_ip() {
+    local interface=$1
+    ip addr show $interface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1
+}
+
+get_network() {
+    local interface=$1
+    ip addr show $interface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1
+}
+
+get_gateway() {
+    local interface=$1
+    ip route | grep "dev $interface" | grep via | awk '{print $3}' | head -n1
+}
+
+check_interface() {
+    local interface=$1
+    if ! ip link show $interface &>/dev/null; then
+        print_error "网卡 $interface 不存在！"
+    fi
+}
+
+detect_system() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VER=$VERSION_ID
+    elif [ -f /etc/redhat-release ]; then
+        OS="rhel"
+    else
+        OS="unknown"
+    fi
+    
+    if systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        NETWORK_MANAGER="NetworkManager"
+    elif systemctl is-active --quiet systemd-networkd 2>/dev/null; then
+        NETWORK_MANAGER="systemd-networkd"
+    elif [ -f /etc/network/interfaces ]; then
+        NETWORK_MANAGER="interfaces"
+    elif [ -d /etc/sysconfig/network-scripts ]; then
+        NETWORK_MANAGER="network-scripts"
+    else
+        NETWORK_MANAGER="unknown"
+    fi
+    
+    print_info "系统: $OS, 网络管理: $NETWORK_MANAGER"
+}
+
+configure_dns() {
+    print_info "配置 DNS 服务器..."
+    
+    DNS1="1.1.1.1"
+    DNS2="8.8.8.8"
+    
+    if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
+        cp /etc/resolv.conf /etc/resolv.conf.backup
+        print_info "已备份原 DNS 配置"
+    fi
+    
+    chattr -i /etc/resolv.conf 2>/dev/null
+    
+    cat > /etc/resolv.conf << DNSEOF
+# DNS Configuration
+nameserver $DNS1
+nameserver $DNS2
+options timeout:2 attempts:3
+DNSEOF
+    
+    cat > /usr/local/bin/setup-dns.sh << 'DNSSCRIPT'
+#!/bin/bash
+chattr -i /etc/resolv.conf 2>/dev/null
+cat > /etc/resolv.conf << RESOLVEOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3
+RESOLVEOF
+chattr +i /etc/resolv.conf 2>/dev/null
+DNSSCRIPT
+
+    chmod +x /usr/local/bin/setup-dns.sh
+    /usr/local/bin/setup-dns.sh
+    
+    print_success "DNS 已配置: $DNS1, $DNS2"
+}
+
+persist_routes_generic() {
+    print_info "持久化路由配置..."
+    
+    cat > /usr/local/bin/setup-policy-routing.sh << 'RCSCRIPT'
+#!/bin/bash
+sleep 3
+
+IX_IP=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+IX_GATEWAY=$(ip route | grep "dev ens18" | grep via | awk '{print $3}' | head -n1)
+ENS20_GATEWAY="__GATEWAY_IP__"
+
+IX_TABLE="ix_return"
+IX_TABLE_ID="100"
+IX_MARK="100"
+
+if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+    echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+fi
+
+ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
+ip rule add from $IX_IP table $IX_TABLE priority 100
+
+ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
+ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+
+ip route flush table $IX_TABLE
+
+[ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+
+for iface in ens18 ens20 ens19; do
+    if ip link show $iface &>/dev/null; then
+        NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+        SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
+    fi
+done
+
+ip route del default 2>/dev/null
+ip route add default via $ENS20_GATEWAY dev ens20
+ip route flush cache 2>/dev/null
+RCSCRIPT
+
+    sed -i "s/__GATEWAY_IP__/$ENS20_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
+    chmod +x /usr/local/bin/setup-policy-routing.sh
+    
+    if [ -f /etc/rc.local ]; then
+        if ! grep -q "setup-policy-routing.sh" /etc/rc.local; then
+            sed -i '/^exit 0/d' /etc/rc.local
+            echo "/usr/local/bin/setup-policy-routing.sh &" >> /etc/rc.local
+            echo "/usr/local/bin/setup-dns.sh &" >> /etc/rc.local
+            echo "exit 0" >> /etc/rc.local
+        fi
+        chmod +x /etc/rc.local
+    else
+        cat > /etc/rc.local << 'RCLOCALFILE'
+#!/bin/bash
+/usr/local/bin/setup-policy-routing.sh &
+/usr/local/bin/setup-dns.sh &
 exit 0
+RCLOCALFILE
+        chmod +x /etc/rc.local
+    fi
+    
+    if command -v systemctl &>/dev/null; then
+        cat > /etc/systemd/system/rc-local.service << 'RCLOCALSERVICE'
+[Unit]
+Description=/etc/rc.local Compatibility
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+ExecStart=/etc/rc.local start
+TimeoutSec=0
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+RCLOCALSERVICE
+        
+        systemctl daemon-reload
+        systemctl enable rc-local.service 2>/dev/null
+    fi
+    
+    print_success "路由持久化配置完成"
+}
+
+persist_iptables() {
+    print_info "持久化 iptables 规则..."
+    
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
+    
+    if command -v systemctl &>/dev/null; then
+        cat > /etc/systemd/system/iptables-restore.service << 'IPTSERVICE'
+[Unit]
+Description=Restore iptables rules
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables-restore /etc/iptables/rules.v4
+
+[Install]
+WantedBy=multi-user.target
+IPTSERVICE
+        
+        systemctl daemon-reload
+        systemctl enable iptables-restore.service 2>/dev/null
+    fi
+    
+    print_success "iptables 规则已持久化"
+}
+
+persist_sysctl() {
+    print_info "持久化 sysctl 配置..."
+    
+    cat > /etc/sysctl.d/99-policy-routing.conf << 'SYSCTLCONF'
+net.ipv4.conf.ens18.rp_filter=2
+net.ipv4.conf.ens20.rp_filter=2
+net.ipv4.conf.all.rp_filter=2
+net.ipv4.ip_forward=1
+SYSCTLCONF
+    
+    sysctl -p /etc/sysctl.d/99-policy-routing.conf > /dev/null 2>&1
+    print_success "sysctl 配置已持久化"
+}
+
+configure_policy_routing() {
+    print_header "开始配置策略路由"
+    
+    if [ "$EUID" -ne 0 ]; then 
+        print_error "需要 root 权限"
+    fi
+    
+    detect_system
+    
+    echo ""
+    echo "【步骤1】检查网卡..."
+    check_interface "ens18"
+    print_success "ens18 存在"
+    check_interface "ens20"
+    print_success "ens20 存在"
+    
+    HAS_ENS19=false
+    if ip link show ens19 &>/dev/null; then
+        HAS_ENS19=true
+        print_success "ens19 存在"
+    else
+        print_info "ens19 不存在（跳过）"
+    fi
+    
+    echo ""
+    echo "【步骤2】读取 ens18 (IX) 配置..."
+    IX_IP=$(get_ip "ens18")
+    [ -z "$IX_IP" ] && print_error "无法读取 ens18 的 IP 地址！"
+    print_success "IX IP: $IX_IP"
+    
+    IX_GATEWAY=$(get_gateway "ens18")
+    if [ -z "$IX_GATEWAY" ]; then
+        IX_NETWORK=$(ip addr show ens18 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
+        IX_GATEWAY=$(echo $IX_NETWORK | awk -F'.' '{print $1"."$2"."$3".1"}')
+        print_info "自动推算网关: $IX_GATEWAY"
+    else
+        print_success "检测到网关: $IX_GATEWAY"
+    fi
+    
+    ENS18_NETWORK=$(get_network "ens18")
+    print_success "IX 网段: $ENS18_NETWORK"
+    
+    echo ""
+    echo "【步骤3】读取 ens20 配置..."
+    ENS20_IP=$(get_ip "ens20")
+    ENS20_NETWORK=$(get_network "ens20")
+    print_success "ens20 IP: $ENS20_IP"
+    print_success "ens20 网段: $ENS20_NETWORK"
+    
+    ENS20_GATEWAY="__GATEWAY_IP__"
+    print_success "ens20 Gateway: $ENS20_GATEWAY (SNAT 服务器)"
+    
+    if [ "$HAS_ENS19" = true ]; then
+        echo ""
+        echo "【步骤4】读取 ens19 配置..."
+        ENS19_IP=$(get_ip "ens19")
+        ENS19_NETWORK=$(get_network "ens19")
+        print_success "ens19 IP: $ENS19_IP"
+        print_success "ens19 网段: $ENS19_NETWORK"
+    fi
+    
+    echo ""
+    echo "【步骤5】配置 DNS..."
+    configure_dns
+    
+    IX_TABLE="ix_return"
+    IX_TABLE_ID="100"
+    IX_MARK="100"
+    
+    echo ""
+    echo "【步骤6】创建路由表..."
+    if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
+        echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
+        print_success "路由表 $IX_TABLE 已创建"
+    else
+        print_info "路由表 $IX_TABLE 已存在"
+    fi
+    
+    echo ""
+    echo "【步骤7】清理现有路由配置..."
+    ip route del default via $IX_GATEWAY dev ens18 2>/dev/null
+    while ip rule del from $IX_IP table $IX_TABLE 2>/dev/null; do :; done
+    while ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null; do :; done
+    ip route flush table $IX_TABLE
+    print_success "旧配置已清理"
+    
+    echo ""
+    echo "【步骤8】配置新路由..."
+    ip route del default 2>/dev/null
+    ip route add default via $ENS20_GATEWAY dev ens20
+    print_success "默认路由: ens20 -> $ENS20_GATEWAY"
+    
+    ip route add default via $IX_GATEWAY dev ens18 table $IX_TABLE
+    print_success "IX 回程默认路由: ens18 -> $IX_GATEWAY"
+    
+    ip route add $ENS18_NETWORK dev ens18 src $IX_IP table $IX_TABLE
+    print_success "添加路由: $ENS18_NETWORK via ens18"
+    
+    ip route add $ENS20_NETWORK dev ens20 src $ENS20_IP table $IX_TABLE
+    print_success "添加路由: $ENS20_NETWORK via ens20"
+    
+    if [ "$HAS_ENS19" = true ] && [ -n "$ENS19_IP" ]; then
+        ip route add $ENS19_NETWORK dev ens19 src $ENS19_IP table $IX_TABLE
+        print_success "添加路由: $ENS19_NETWORK via ens19"
+    fi
+    
+    echo ""
+    echo "【步骤9】添加策略路由规则..."
+    ip rule add from $IX_IP table $IX_TABLE priority 100
+    print_success "规则: from $IX_IP use table $IX_TABLE (priority 100)"
+    
+    ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
+    print_success "规则: fwmark $IX_MARK use table $IX_TABLE (priority 99)"
+    
+    echo ""
+    echo "【步骤10】配置 iptables 连接跟踪..."
+    iptables -t mangle -D PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK 2>/dev/null
+    iptables -t mangle -D OUTPUT -j CONNMARK --restore-mark 2>/dev/null
+    iptables -t mangle -A PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK
+    iptables -t mangle -A OUTPUT -j CONNMARK --restore-mark
+    print_success "连接跟踪已配置"
+    
+    echo ""
+    echo "【步骤11】调整系统参数..."
+    sysctl -w net.ipv4.conf.ens18.rp_filter=2 > /dev/null
+    sysctl -w net.ipv4.conf.ens20.rp_filter=2 > /dev/null
+    sysctl -w net.ipv4.conf.all.rp_filter=2 > /dev/null
+    print_success "rp_filter 已设置为宽松模式(2)"
+    
+    ip route flush cache 2>/dev/null
+    print_success "路由缓存已刷新"
+    
+    echo ""
+    echo "【步骤12】持久化配置..."
+    persist_sysctl
+    persist_iptables
+    persist_routes_generic
+    print_success "所有配置已持久化"
+    
+    echo ""
+    print_header "策略路由配置完成！"
+    echo ""
+    echo "📌 网卡配置："
+    echo "   • ens18 (IX): $IX_IP / $ENS18_NETWORK -> $IX_GATEWAY"
+    echo "   • ens20: $ENS20_IP / $ENS20_NETWORK -> $ENS20_GATEWAY (SNAT服务器)"
+    [ "$HAS_ENS19" = true ] && echo "   • ens19: $ENS19_IP / $ENS19_NETWORK"
+    echo ""
+    echo "📌 DNS 配置："
+    echo "   • 主 DNS: 1.1.1.1 (Cloudflare)"
+    echo "   • 备 DNS: 8.8.8.8 (Google)"
+    echo ""
+    echo "📌 路由策略："
+    echo "   • 默认出站: ens20 -> $ENS20_GATEWAY (通过SNAT服务器)"
+    echo "   • IX 回程: ens18 -> $IX_GATEWAY"
+    echo ""
+}
+
+configure_policy_routing
 EOF
 
     sed -i "s/__GATEWAY_IP__/$gateway_ip/g" "$temp_script"
@@ -629,17 +817,38 @@ EOF
     log_step "执行远程策略路由配置..."
     echo ""
     
+    echo -e "${CYAN}开始远程配置，请稍候...${NC}"
+    echo ""
+    
     if SSHPASS="$remote_password" sshpass -e ssh \
+        -o ConnectTimeout=15 \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
+        -o PreferredAuthentications=password \
+        -o PubkeyAuthentication=no \
         -p $ssh_port ${ssh_user}@${remote_ip} "bash -s" < "$temp_script" 2>&1; then
         echo ""
         log_info "✅ 远程策略路由配置成功！"
         rm -f "$temp_script"
         return 0
     else
+        local ssh_error=$?
         echo ""
-        log_error "远程配置失败！"
+        log_error "远程配置失败！(退出码: $ssh_error)"
+        echo ""
+        echo -e "${YELLOW}可能的原因：${NC}"
+        echo "  1. SSH 密码错误"
+        echo "  2. SSH 服务配置不允许密码登录"
+        echo "  3. 用户权限不足"
+        echo "  4. 网络连接中断"
+        echo ""
+        echo -e "${YELLOW}建议操作：${NC}"
+        echo "  • 确认密码正确"
+        echo "  • 检查 /etc/ssh/sshd_config："
+        echo "    PasswordAuthentication yes"
+        echo "    PermitRootLogin yes"
+        echo "  • 查看远程日志: tail -f /var/log/auth.log"
+        echo ""
         rm -f "$temp_script"
         return 1
     fi
@@ -658,7 +867,6 @@ clean_policy_routing() {
     echo "  • ix_return 路由表"
     echo "  • 策略路由规则"
     echo "  • iptables mangle 规则"
-    echo "  • 默认路由（可选）"
     echo ""
     
     read -p "确定要清空吗？(yes/no) [no]: " confirm
@@ -679,21 +887,12 @@ clean_policy_routing() {
     while ip rule list | grep -q "100:"; do
         ip rule del priority 100 2>/dev/null
     done
-    
     while ip rule list | grep -q "99:"; do
         ip rule del priority 99 2>/dev/null
     done
     
     log_info "清空 iptables mangle 规则..."
-    iptables -t mangle -F PREROUTING 2>/dev/null
-    iptables -t mangle -F OUTPUT 2>/dev/null
-    iptables -t mangle -X 2>/dev/null
-    
-    read -p "是否清空默认路由？(y/n) [n]: " clear_default
-    if [[ "$clear_default" =~ ^[Yy]$ ]]; then
-        log_info "清空默认路由..."
-        ip route del default 2>/dev/null
-    fi
+    iptables -t mangle -F 2>/dev/null
     
     log_info "刷新路由缓存..."
     ip route flush cache 2>/dev/null
@@ -702,19 +901,6 @@ clean_policy_routing() {
     
     echo ""
     log_info "✅ 清理完成！"
-    echo ""
-    
-    echo "当前路由规则："
-    ip rule list
-    echo ""
-    
-    echo "当前默认路由："
-    ip route show default
-    echo ""
-    
-    echo "ix_return 路由表："
-    ip route show table ix_return
-    echo ""
 }
 
 ###########################################
@@ -747,10 +933,16 @@ interactive_setup() {
         exit 1
     fi
     
-    # 使用改进的重试机制
-    IX_SERVER_PASSWORD=$(retry_ssh_connection "$IX_SERVER_IP")
+    # 网络连通性检查
+    if ! check_network_connectivity "$IX_SERVER_IP"; then
+        log_error "网络连通性检查失败，无法继续"
+        exit 1
+    fi
+    
+    # 获取密码
+    IX_SERVER_PASSWORD=$(get_ssh_password "$IX_SERVER_IP")
     if [ $? -ne 0 ] || [ -z "$IX_SERVER_PASSWORD" ]; then
-        log_error "无法建立 SSH 连接"
+        log_error "密码输入失败"
         exit 1
     fi
     
@@ -760,9 +952,7 @@ interactive_setup() {
     echo ""
     log_step "步骤 2/3: 配置允许转发的 IP 地址"
     echo ""
-    log_info "IX IP ($IX_SERVER_IP) 已自动添加"
-    echo ""
-
+    
     echo ""
     log_step "步骤 3/3: 确认配置"
     echo ""
@@ -771,15 +961,14 @@ interactive_setup() {
     echo ""
     echo -e "  ${YELLOW}本机 (SNAT 服务器):${NC}"
     echo "    ens20 IP: $LOCAL_ENS20_IP"
-    echo "    ens18 (公网出口): $(get_external_ip 2>/dev/null || echo '待检测')"
+    echo "    ens18: $(get_external_ip 2>/dev/null || echo '待检测')"
     echo ""
     echo -e "  ${YELLOW}远程 IX 服务器:${NC}"
     echo "    IP: $IX_SERVER_IP"
-    echo "    ens20 网关将设置为: ${GREEN}$LOCAL_ENS20_IP${NC} (本机)"
+    echo "    ens20 网关: ${GREEN}$LOCAL_ENS20_IP${NC}"
     echo "    DNS: 1.1.1.1, 8.8.8.8"
-    echo "    将配置策略路由并持久化"
     echo ""
-    echo -e "  ${YELLOW}允许转发的 IP 列表:${NC}"
+    echo -e "  ${YELLOW}允许转发的 IP:${NC}"
     for ip in "${ALLOWED_IPS[@]}"; do
         if [ "$ip" == "$IX_SERVER_IP" ]; then
             echo "    • $ip ${GREEN}(IX Server)${NC}"
@@ -821,111 +1010,81 @@ interactive_setup() {
         echo -e "${GREEN}✅ 远程策略路由配置成功${NC}"
         echo -e "${GREEN}✅ 所有配置已持久化${NC}"
         echo ""
+        echo -e "${YELLOW}验证命令 (在 IX 端):${NC}"
+        echo "  • ping $LOCAL_ENS20_IP"
+        echo "  • nslookup google.com"
+        echo "  • ip route"
+        echo ""
     else
         echo ""
-        log_warn "本地 SNAT 配置成功，但远程策略路由配置失败"
+        log_warn "本地 SNAT 配置成功，但远程配置失败"
+        echo ""
+        echo -e "${YELLOW}可以稍后手动在 IX 端执行：${NC}"
+        echo "  1. 设置 ens20 网关: ip route add default via $LOCAL_ENS20_IP dev ens20"
+        echo "  2. 配置 DNS: echo 'nameserver 1.1.1.1' > /etc/resolv.conf"
+        echo ""
     fi
 }
 
 ###########################################
-# 其他处理函数（保持不变）
+# 其他命令处理
 ###########################################
 
 handle_add_ip() {
     check_root
-    local ip="$1"
-    
-    if [ -z "$ip" ]; then
+    if [ -z "$1" ]; then
         log_error "请指定 IP 地址"
-        echo "用法: $0 add <IP地址>"
         exit 1
     fi
-    
     check_interface "$INTERNAL_IF"
     check_interface "$EXTERNAL_IF"
-    
-    add_allowed_ip "$ip"
+    add_allowed_ip "$1"
     save_iptables
 }
 
 handle_del_ip() {
     check_root
-    local ip="$1"
-    
-    if [ -z "$ip" ]; then
+    if [ -z "$1" ]; then
         log_error "请指定 IP 地址"
-        echo "用法: $0 del <IP地址>"
         exit 1
     fi
-    
     check_interface "$INTERNAL_IF"
     check_interface "$EXTERNAL_IF"
-    
-    if iptables -C FORWARD -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT 2>/dev/null; then
-        iptables -D FORWARD -s "$ip" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
-        log_info "✅ 已从允许列表删除 $ip"
+    if iptables -C FORWARD -s "$1" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT 2>/dev/null; then
+        iptables -D FORWARD -s "$1" -i "$INTERNAL_IF" -o "$EXTERNAL_IF" -j ACCEPT
+        log_info "✅ 已删除 $1"
         save_iptables
     else
-        log_warn "IP $ip 不在允许列表中"
+        log_warn "IP $1 不在列表中"
     fi
 }
 
 handle_list() {
     check_interface "$INTERNAL_IF"
     check_interface "$EXTERNAL_IF"
-    
     print_header "允许转发的 IP 列表"
-    
-    INTERNAL_NETWORK=$(get_internal_network)
-    EXTERNAL_IP=$(get_external_ip)
-    LOCAL_ENS20_IP=$(get_internal_ip)
-    
-    echo -e "${BLUE}本机配置:${NC}"
-    echo -e "  • 内网接口: $INTERNAL_IF ($LOCAL_ENS20_IP)"
-    echo -e "  • 外网接口: $EXTERNAL_IF ($EXTERNAL_IP)"
-    echo -e "  • 网段: $INTERNAL_NETWORK"
+    echo -e "${BLUE}本机:${NC} $(get_internal_ip) (ens20) → $(get_external_ip) (ens18)"
     echo ""
-    
-    local rules=$(iptables -L FORWARD -n -v --line-numbers | grep "$EXTERNAL_IF" | grep ACCEPT | grep -v "state RELATED,ESTABLISHED")
-    
+    local rules=$(iptables -L FORWARD -n -v --line-numbers | grep "$EXTERNAL_IF" | grep ACCEPT | grep -v "RELATED,ESTABLISHED")
     if [ -z "$rules" ]; then
-        log_warn "当前没有配置允许转发的 IP"
+        log_warn "无配置"
     else
-        echo -e "${GREEN}序号  数据包  字节数    源地址${NC}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "$rules" | awk '{printf "%-6s%-8s%-10s%s\n", $1, $2, $3, $8}'
+        echo "$rules" | awk '{printf "%-6s%s\n", $1, $8}'
     fi
-    
     echo ""
 }
 
 show_help() {
     cat << EOF
-${GREEN}SNAT + 策略路由 一体化配置脚本 (修复版)${NC}
+${GREEN}SNAT + 策略路由配置脚本 (简化版)${NC}
 
-${YELLOW}用法:${NC}
-    $0                    # 运行交互式配置向导
-    $0 <command> [args]   # 执行单独命令
-
-${YELLOW}可用命令:${NC}
-    ${BLUE}setup${NC}               运行完整配置向导（推荐首次使用）
-    ${BLUE}add${NC} <IP>           添加允许转发的 IP 地址
-    ${BLUE}del${NC} <IP>           删除允许转发的 IP 地址
-    ${BLUE}list${NC}                列出所有允许转发的 IP
-    ${BLUE}clean${NC}               清空策略路由配置
-    ${BLUE}test-ssh${NC} <IP>      测试 SSH 连接（诊断模式）
-    ${BLUE}help${NC}                显示此帮助信息
-
-${YELLOW}示例:${NC}
-    $0                    # 运行配置向导
-    $0 add 192.168.1.105  # 添加 IP
-    $0 list               # 查看列表
-    $0 clean              # 清空配置
-    $0 test-ssh 1.2.3.4   # 测试 SSH
-
-${YELLOW}前置要求:${NC}
-    • root 权限
-    • sshpass: apt install sshpass
+${YELLOW}命令:${NC}
+    $0              # 配置向导
+    $0 add <IP>     # 添加 IP
+    $0 del <IP>     # 删除 IP
+    $0 list         # 列表
+    $0 clean        # 清空
+    $0 help         # 帮助
 EOF
 }
 
@@ -950,27 +1109,11 @@ main() {
         clean|clear|reset)
             clean_policy_routing
             ;;
-        test-ssh)
-            if [ -z "$2" ]; then
-                echo "用法: $0 test-ssh <IP地址> [端口] [用户名]"
-                exit 1
-            fi
-            read -s -p "请输入 SSH 密码: " password
-            echo ""
-            test_ssh_connection "$2" "$password" "${3:-22}" "${4:-root}"
-            ;;
         help|--help|-h)
             show_help
             ;;
         *)
-            if [ -z "$1" ]; then
-                interactive_setup
-            else
-                log_error "未知命令: $1"
-                echo ""
-                show_help
-                exit 1
-            fi
+            interactive_setup
             ;;
     esac
 }
