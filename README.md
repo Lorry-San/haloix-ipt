@@ -1,7 +1,7 @@
 ## Halocloud-QianhaiIX(KKIX) 路由配置脚本
 
 > [!Note]
-> · 你需要让kk给你开sd-wan，让iepl接入才行。不然一切都是白搭（当然现在根本买不到）
+> · 你需要让kk给你开sd-wan，让iepl接入才行。不然一切都是白搭
 
 ---
 
@@ -22,7 +22,6 @@ kk网络架构现在是这样的:
 wget -O ixsnat https://raw.githubusercontent.com/Lorry-San/haloix-ipt/refs/heads/main/ixsnat && chmod +x ixsnat && ./ixsnat
 ```
 
-话又说回来了，新脚本写好了，于是事情就简单了
 
 填上IX端的ens20 IP和SSH密码然后疯狂回车就行了
 
