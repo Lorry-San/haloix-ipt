@@ -6,6 +6,7 @@
 # 2. 远程配置策略路由（通过SSH）
 # 3. IX端ens20网关指向本机ens20 IP
 # 4. IX端路由配置持久化
+# 5. IX端DNS配置并持久化
 ###########################################
 
 # 颜色定义
@@ -366,6 +367,170 @@ detect_system() {
     print_info "系统: $OS, 网络管理: $NETWORK_MANAGER"
 }
 
+configure_dns() {
+    print_info "配置 DNS 服务器..."
+    
+    DNS1="1.1.1.1"
+    DNS2="8.8.8.8"
+    
+    # 备份原有配置
+    if [ -f /etc/resolv.conf ] && [ ! -f /etc/resolv.conf.backup ]; then
+        cp /etc/resolv.conf /etc/resolv.conf.backup
+        print_info "已备份原 DNS 配置到 /etc/resolv.conf.backup"
+    fi
+    
+    case "$NETWORK_MANAGER" in
+        NetworkManager)
+            configure_dns_networkmanager
+            ;;
+        systemd-networkd)
+            configure_dns_systemd_networkd
+            ;;
+        *)
+            configure_dns_generic
+            ;;
+    esac
+    
+    # 立即应用 DNS 设置
+    cat > /etc/resolv.conf << DNSEOF
+# DNS Configuration - Managed by policy routing script
+nameserver $DNS1
+nameserver $DNS2
+options timeout:2 attempts:3 rotate single-request-reopen
+DNSEOF
+    
+    print_success "DNS 已配置: $DNS1, $DNS2"
+}
+
+configure_dns_networkmanager() {
+    print_info "使用 NetworkManager 持久化 DNS..."
+    
+    # 禁止 NetworkManager 自动修改 resolv.conf
+    if [ -f /etc/NetworkManager/NetworkManager.conf ]; then
+        if ! grep -q "dns=none" /etc/NetworkManager/NetworkManager.conf; then
+            sed -i '/\[main\]/a dns=none' /etc/NetworkManager/NetworkManager.conf
+        fi
+    fi
+    
+    # 使用 nmcli 配置 DNS（如果有具体连接）
+    if command -v nmcli &>/dev/null; then
+        # 获取活动连接
+        ACTIVE_CONN=$(nmcli -t -f NAME,DEVICE connection show --active | grep "ens20" | cut -d: -f1 | head -n1)
+        if [ -n "$ACTIVE_CONN" ]; then
+            nmcli connection modify "$ACTIVE_CONN" ipv4.dns "1.1.1.1 8.8.8.8" 2>/dev/null
+            nmcli connection modify "$ACTIVE_CONN" ipv4.ignore-auto-dns yes 2>/dev/null
+            print_info "已通过 NetworkManager 设置 DNS"
+        fi
+    fi
+    
+    # 保护 resolv.conf 不被覆盖
+    chattr -i /etc/resolv.conf 2>/dev/null
+    cat > /etc/resolv.conf << NMRESOLVEOF
+# DNS Configuration - Protected
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3 rotate single-request-reopen
+NMRESOLVEOF
+    chattr +i /etc/resolv.conf 2>/dev/null
+    
+    print_success "NetworkManager DNS 配置完成"
+}
+
+configure_dns_systemd_networkd() {
+    print_info "使用 systemd-networkd 持久化 DNS..."
+    
+    # 配置 systemd-resolved
+    if [ -f /etc/systemd/resolved.conf ]; then
+        cat > /etc/systemd/resolved.conf << RESOLVEDCONF
+[Resolve]
+DNS=1.1.1.1 8.8.8.8
+FallbackDNS=1.0.0.1 8.8.4.4
+DNSSEC=allow-downgrade
+DNSOverTLS=no
+RESOLVEDCONF
+        
+        systemctl restart systemd-resolved 2>/dev/null
+        print_info "已配置 systemd-resolved"
+    fi
+    
+    # 确保 resolv.conf 链接正确
+    if [ -L /etc/resolv.conf ]; then
+        rm -f /etc/resolv.conf
+    fi
+    ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf 2>/dev/null || \
+    cat > /etc/resolv.conf << SDRESOLVEOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3 rotate single-request-reopen
+SDRESOLVEOF
+    
+    print_success "systemd-networkd DNS 配置完成"
+}
+
+configure_dns_generic() {
+    print_info "使用通用方法持久化 DNS..."
+    
+    # 创建 DNS 配置脚本
+    cat > /usr/local/bin/setup-dns.sh << 'DNSSCRIPT'
+#!/bin/bash
+# DNS 配置脚本
+
+# 移除不可变属性
+chattr -i /etc/resolv.conf 2>/dev/null
+
+# 配置 DNS
+cat > /etc/resolv.conf << RESOLVEOF
+# DNS Configuration - Auto configured
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+options timeout:2 attempts:3 rotate single-request-reopen
+RESOLVEOF
+
+# 设置为不可变（防止被覆盖）
+chattr +i /etc/resolv.conf 2>/dev/null
+
+logger "DNS 配置已应用"
+DNSSCRIPT
+
+    chmod +x /usr/local/bin/setup-dns.sh
+    
+    # 立即执行
+    /usr/local/bin/setup-dns.sh
+    
+    # 添加到 rc.local
+    if [ -f /etc/rc.local ]; then
+        if ! grep -q "setup-dns.sh" /etc/rc.local; then
+            sed -i '/^exit 0/d' /etc/rc.local
+            echo "/usr/local/bin/setup-dns.sh" >> /etc/rc.local
+            echo "exit 0" >> /etc/rc.local
+        fi
+    fi
+    
+    # 创建 systemd 服务
+    if command -v systemctl &>/dev/null; then
+        cat > /etc/systemd/system/dns-setup.service << 'DNSSERVICE'
+[Unit]
+Description=DNS Configuration
+After=network.target
+Before=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-dns.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+DNSSERVICE
+        
+        systemctl daemon-reload
+        systemctl enable dns-setup.service 2>/dev/null
+        print_info "已创建 DNS systemd 服务"
+    fi
+    
+    print_success "通用 DNS 配置完成"
+}
+
 persist_routes() {
     print_info "开始持久化路由配置..."
     
@@ -432,6 +597,9 @@ if [ "$2" = "up" ]; then
     ip route del default 2>/dev/null
     ip route add default via $ENS20_GATEWAY dev ens20
     ip route flush cache 2>/dev/null
+    
+    # 确保 DNS 配置
+    /usr/local/bin/setup-dns.sh 2>/dev/null
 fi
 NMSCRIPT
     
@@ -546,6 +714,9 @@ if [ "$IFACE" = "ens20" ] || [ "$IFACE" = "ens18" ]; then
     ip route del default 2>/dev/null
     ip route add default via $ENS20_GATEWAY dev ens20
     ip route flush cache 2>/dev/null
+    
+    # 确保 DNS 配置
+    /usr/local/bin/setup-dns.sh 2>/dev/null
 fi
 IFSCRIPT
 
@@ -610,6 +781,7 @@ RCSCRIPT
         if ! grep -q "setup-policy-routing.sh" /etc/rc.local; then
             sed -i '/^exit 0/d' /etc/rc.local
             echo "/usr/local/bin/setup-policy-routing.sh &" >> /etc/rc.local
+            echo "/usr/local/bin/setup-dns.sh &" >> /etc/rc.local
             echo "exit 0" >> /etc/rc.local
         fi
         chmod +x /etc/rc.local
@@ -617,6 +789,7 @@ RCSCRIPT
         cat > /etc/rc.local << 'RCLOCALFILE'
 #!/bin/bash
 /usr/local/bin/setup-policy-routing.sh &
+/usr/local/bin/setup-dns.sh &
 exit 0
 RCLOCALFILE
         chmod +x /etc/rc.local
@@ -754,12 +927,16 @@ configure_policy_routing() {
         print_success "ens19 网段: $ENS19_NETWORK"
     fi
     
+    echo ""
+    echo "【步骤5】配置 DNS..."
+    configure_dns
+    
     IX_TABLE="ix_return"
     IX_TABLE_ID="100"
     IX_MARK="100"
     
     echo ""
-    echo "【步骤5】创建路由表..."
+    echo "【步骤6】创建路由表..."
     if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
         echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
         print_success "路由表 $IX_TABLE 已创建"
@@ -768,7 +945,7 @@ configure_policy_routing() {
     fi
     
     echo ""
-    echo "【步骤6】清理现有路由配置..."
+    echo "【步骤7】清理现有路由配置..."
     ip route del default via $IX_GATEWAY dev ens18 2>/dev/null
     while ip rule del from $IX_IP table $IX_TABLE 2>/dev/null; do :; done
     while ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null; do :; done
@@ -776,7 +953,7 @@ configure_policy_routing() {
     print_success "旧配置已清理"
     
     echo ""
-    echo "【步骤7】配置新路由..."
+    echo "【步骤8】配置新路由..."
     ip route del default 2>/dev/null
     ip route add default via $ENS20_GATEWAY dev ens20
     print_success "默认路由: ens20 -> $ENS20_GATEWAY"
@@ -796,7 +973,7 @@ configure_policy_routing() {
     fi
     
     echo ""
-    echo "【步骤8】添加策略路由规则..."
+    echo "【步骤9】添加策略路由规则..."
     ip rule add from $IX_IP table $IX_TABLE priority 100
     print_success "规则: from $IX_IP use table $IX_TABLE (priority 100)"
     
@@ -804,7 +981,7 @@ configure_policy_routing() {
     print_success "规则: fwmark $IX_MARK use table $IX_TABLE (priority 99)"
     
     echo ""
-    echo "【步骤9】配置 iptables 连接跟踪..."
+    echo "【步骤10】配置 iptables 连接跟踪..."
     iptables -t mangle -D PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK 2>/dev/null
     iptables -t mangle -D OUTPUT -j CONNMARK --restore-mark 2>/dev/null
     iptables -t mangle -A PREROUTING -i ens18 -j CONNMARK --set-mark $IX_MARK
@@ -812,7 +989,7 @@ configure_policy_routing() {
     print_success "连接跟踪已配置"
     
     echo ""
-    echo "【步骤10】调整系统参数..."
+    echo "【步骤11】调整系统参数..."
     sysctl -w net.ipv4.conf.ens18.rp_filter=2 > /dev/null
     sysctl -w net.ipv4.conf.ens20.rp_filter=2 > /dev/null
     sysctl -w net.ipv4.conf.all.rp_filter=2 > /dev/null
@@ -822,7 +999,7 @@ configure_policy_routing() {
     print_success "路由缓存已刷新"
     
     echo ""
-    echo "【步骤11】持久化配置..."
+    echo "【步骤12】持久化配置..."
     persist_sysctl
     persist_iptables
     persist_routes
@@ -836,6 +1013,10 @@ configure_policy_routing() {
     echo "   • ens20: $ENS20_IP / $ENS20_NETWORK -> $ENS20_GATEWAY (SNAT服务器)"
     [ "$HAS_ENS19" = true ] && echo "   • ens19: $ENS19_IP / $ENS19_NETWORK"
     echo ""
+    echo "📌 DNS 配置："
+    echo "   • 主 DNS: 1.1.1.1 (Cloudflare)"
+    echo "   • 备 DNS: 8.8.8.8 (Google)"
+    echo ""
     echo "📌 路由策略："
     echo "   • 默认出站: ens20 -> $ENS20_GATEWAY (通过SNAT服务器)"
     echo "   • IX 回程: ens18 -> $IX_GATEWAY"
@@ -844,6 +1025,10 @@ configure_policy_routing() {
     echo "   • 系统: $OS"
     echo "   • 网络管理: $NETWORK_MANAGER"
     echo "   • 配置已在系统重启后自动生效"
+    echo ""
+    echo "📌 验证 DNS："
+    echo "   • 运行: nslookup google.com"
+    echo "   • 运行: dig google.com"
     echo ""
 }
 
@@ -877,7 +1062,7 @@ EOF
 interactive_setup() {
     check_root
     
-    print_header "Halocloud IX SNAT + 策略路由一键配置脚本"
+    print_header "SNAT + 策略路由 一体化配置向导"
     
     # 首先获取本机 ens20 IP
     check_interface "$INTERNAL_IF"
@@ -921,6 +1106,27 @@ interactive_setup() {
     log_info "IX IP ($IX_SERVER_IP) 已自动添加"
     echo ""
     
+    read -p "是否需要添加其他允许转发的 IP？(y/n) [n]: " add_more
+    add_more=${add_more:-n}
+    
+    if [[ "$add_more" =~ ^[Yy]$ ]]; then
+        while true; do
+            echo ""
+            read -p "请输入 IP 地址 (支持 CIDR 格式，留空结束): " new_ip
+            
+            if [ -z "$new_ip" ]; then
+                break
+            fi
+            
+            if ! validate_ip "$new_ip"; then
+                log_error "无效的 IP 地址格式: $new_ip"
+                continue
+            fi
+            
+            ALLOWED_IPS+=("$new_ip")
+            log_info "✅ 已添加: $new_ip"
+        done
+    fi
     
     # 步骤3: 确认配置
     echo ""
@@ -936,6 +1142,7 @@ interactive_setup() {
     echo -e "  ${YELLOW}远程 IX 服务器:${NC}"
     echo "    IP: $IX_SERVER_IP"
     echo "    ens20 网关将设置为: ${GREEN}$LOCAL_ENS20_IP${NC} (本机)"
+    echo "    DNS: 1.1.1.1, 8.8.8.8"
     echo "    将配置策略路由并持久化"
     echo ""
     echo -e "  ${YELLOW}允许转发的 IP 列表:${NC}"
@@ -952,6 +1159,7 @@ interactive_setup() {
     echo ""
     echo -e "  ${YELLOW}持久化配置:${NC}"
     echo "    • IX 端路由规则将在重启后自动恢复"
+    echo "    • IX 端 DNS 配置将在重启后自动恢复"
     echo "    • 本地 SNAT 规则将在重启后自动恢复"
     echo ""
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -981,7 +1189,7 @@ interactive_setup() {
     
     # 2. 配置远程策略路由（传入本机 ens20 IP 作为网关）
     echo ""
-    log_step "【阶段 2/2】配置远程策略路由并持久化..."
+    log_step "【阶段 2/2】配置远程策略路由、DNS 并持久化..."
     echo ""
     
     if configure_remote_policy_routing "$IX_SERVER_IP" "$IX_SERVER_PASSWORD" "$LOCAL_ENS20_IP"; then
@@ -989,6 +1197,7 @@ interactive_setup() {
         echo ""
         echo -e "${GREEN}✅ 本地 SNAT 配置成功${NC}"
         echo -e "${GREEN}✅ 远程策略路由配置成功${NC}"
+        echo -e "${GREEN}✅ 远程 DNS 配置成功${NC}"
         echo -e "${GREEN}✅ 所有配置已持久化${NC}"
         echo ""
         echo -e "${CYAN}配置详情:${NC}"
@@ -996,6 +1205,7 @@ interactive_setup() {
         echo "  • 允许转发的 IP 数量: ${#ALLOWED_IPS[@]}"
         echo "  • 远程 IX 服务器: $IX_SERVER_IP"
         echo "  • IX ens20 网关: $LOCAL_ENS20_IP (指向本机)"
+        echo "  • IX DNS: 1.1.1.1, 8.8.8.8"
         echo ""
         echo -e "${CYAN}流量路径:${NC}"
         echo "  ${YELLOW}主动出站:${NC} IX Server -> 本机 ens20 ($LOCAL_ENS20_IP) -> SNAT -> 公网 (ens18)"
@@ -1004,11 +1214,18 @@ interactive_setup() {
         echo -e "${CYAN}持久化状态:${NC}"
         echo "  ${GREEN}✓${NC} 本地 iptables 规则已保存"
         echo "  ${GREEN}✓${NC} 远程路由规则已配置开机自启"
+        echo "  ${GREEN}✓${NC} 远程 DNS 已配置开机自启"
         echo "  ${GREEN}✓${NC} 系统重启后自动恢复配置"
+        echo ""
+        echo -e "${YELLOW}验证命令 (在 IX 端运行):${NC}"
+        echo "  • 测试 DNS: nslookup google.com"
+        echo "  • 测试网关: ping $LOCAL_ENS20_IP"
+        echo "  • 查看路由: ip route"
+        echo "  • 查看 DNS: cat /etc/resolv.conf"
         echo ""
         echo -e "${YELLOW}注意事项:${NC}"
         echo "  • 所有配置已自动保存并持久化"
-        echo "  • IX 端支持多种网络管理器（NetworkManager/systemd-networkd/interfaces等）"
+        echo "  • DNS 配置已锁定，防止被覆盖"
         echo "  • 如需添加更多 IP，请使用: $0 add <IP>"
         echo ""
     else
@@ -1016,6 +1233,7 @@ interactive_setup() {
         log_warn "本地 SNAT 配置成功，但远程策略路由配置失败"
         log_info "您可以稍后手动配置远程服务器"
         log_info "IX 端 ens20 网关应设置为: $LOCAL_ENS20_IP"
+        log_info "IX 端 DNS 应设置为: 1.1.1.1, 8.8.8.8"
     fi
 }
 
@@ -1094,7 +1312,7 @@ handle_list() {
 
 show_help() {
     cat << EOF
-${GREEN}SNAT + 策略路由 一体化配置脚本 (带持久化)${NC}
+${GREEN}SNAT + 策略路由 一体化配置脚本 (带持久化 + DNS)${NC}
 
 ${YELLOW}用法:${NC}
     $0                    # 运行交互式配置向导
@@ -1114,7 +1332,14 @@ ${YELLOW}配置向导包含:${NC}
     4. 自动配置本地 SNAT
     5. 自动配置远程策略路由
     6. IX 端 ens20 网关自动设置为本机 ens20 IP
-    ${GREEN}7. 所有配置自动持久化（重启后自动恢复）${NC}
+    ${GREEN}7. IX 端 DNS 设置为 1.1.1.1 和 8.8.8.8${NC}
+    ${GREEN}8. 所有配置自动持久化（重启后自动恢复）${NC}
+
+${YELLOW}DNS 配置:${NC}
+    • 主 DNS: 1.1.1.1 (Cloudflare)
+    • 备 DNS: 8.8.8.8 (Google)
+    • 自动锁定，防止被覆盖
+    • 重启后自动恢复
 
 ${YELLOW}持久化支持:${NC}
     • NetworkManager (Ubuntu 18+, CentOS 8+)
@@ -1139,6 +1364,10 @@ ${YELLOW}示例:${NC}
 ${YELLOW}前置要求:${NC}
     • 必须使用 root 权限运行
     • 需要安装 sshpass: apt install sshpass
+
+${YELLOW}验证 DNS (在 IX 端):${NC}
+    nslookup google.com
+    cat /etc/resolv.conf
 EOF
 }
 
