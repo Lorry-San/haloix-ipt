@@ -50,9 +50,9 @@ log_step() {
 
 print_header() {
     echo ""
-    echo -e "${CYAN}=========================================${NC}"
+    echo -e "${CYAN}=============================================================${NC}"
     echo -e "${CYAN}  $1${NC}"
-    echo -e "${CYAN}=========================================${NC}"
+    echo -e "${CYAN}=============================================================${NC}"
     echo ""
 }
 
@@ -301,9 +301,9 @@ PURPLE='\033[0;35m'
 NC='\033[0m'
 
 print_header() {
-    echo -e "${BLUE}==========================================${NC}"
+    echo -e "${BLUE}=============================================================${NC}"
     echo -e "${BLUE}  $1${NC}"
-    echo -e "${BLUE}==========================================${NC}"
+    echo -e "${BLUE}=============================================================${NC}"
 }
 
 print_success() {
@@ -1105,29 +1105,7 @@ interactive_setup() {
     echo ""
     log_info "IX IP ($IX_SERVER_IP) 已自动添加"
     echo ""
-    
-    read -p "是否需要添加其他允许转发的 IP？(y/n) [n]: " add_more
-    add_more=${add_more:-n}
-    
-    if [[ "$add_more" =~ ^[Yy]$ ]]; then
-        while true; do
-            echo ""
-            read -p "请输入 IP 地址 (支持 CIDR 格式，留空结束): " new_ip
-            
-            if [ -z "$new_ip" ]; then
-                break
-            fi
-            
-            if ! validate_ip "$new_ip"; then
-                log_error "无效的 IP 地址格式: $new_ip"
-                continue
-            fi
-            
-            ALLOWED_IPS+=("$new_ip")
-            log_info "✅ 已添加: $new_ip"
-        done
-    fi
-    
+   
     # 步骤3: 确认配置
     echo ""
     log_step "步骤 3/3: 确认配置"
