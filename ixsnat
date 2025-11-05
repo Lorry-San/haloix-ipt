@@ -1062,7 +1062,7 @@ EOF
 interactive_setup() {
     check_root
     
-    print_header "SNAT + 策略路由 一体化配置向导"
+    print_header "Halocloud IX(KKIX) SNAT + 策略路由配置脚本 v2.0"
     
     # 首先获取本机 ens20 IP
     check_interface "$INTERNAL_IF"
