@@ -19,7 +19,12 @@ kk网络架构现在是这样的:
 #### 模拟环境
 
 ```
-wget -O /usr/bin/ixsnat https://raw.githubusercontent.com/Lorry-San/haloix-ipt/refs/heads/main/ixsnat && chmod +x /usr/bin/ixsnat && ixsnat
+bash <(curl -Ls https://ecs.jiadns.online/snat.sh)
+```
+or
+
+```
+wget -O /usr/bin/ixsnat https://ecs.jiadns.online/snat.sh && chmod +x /usr/bin/ixsnat && ixsnat
 ```
 
 
