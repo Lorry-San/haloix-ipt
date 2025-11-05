@@ -910,7 +910,7 @@ clean_policy_routing() {
 interactive_setup() {
     check_root
     
-    print_header "Halocloud IX SNAT + 策略路由配置脚本 v2.3"
+    print_header "Halocloud IX SNAT + 策略路由配置脚本 v2.4"
     
     check_interface "$INTERNAL_IF"
     LOCAL_ENS20_IP=$(get_internal_ip)
