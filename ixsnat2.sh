@@ -20,7 +20,7 @@ NC='\033[0m' # No Color
 
 # 全局变量
 INTERNAL_IF="eth0"  # 内网接口
-EXTERNAL_IF="eth0"  # 外网接口
+EXTERNAL_IF="eth2"  # 外网接口
 ALLOWED_IPS=()       # 允许转发的IP数组
 LOCAL_eth2_IP=""    # 本机eth2 IP（作为IX端的网关）
 
@@ -609,7 +609,7 @@ if [ "$2" = "up" ]; then
     
     [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
     
-    for iface in eth0 eth2 eth0; do
+    for iface in eth0 eth2 ens19; do
         if ip link show $iface &>/dev/null; then
             NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
             SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
@@ -658,7 +658,7 @@ ip route flush table $IX_TABLE
 
 [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
 
-for iface in eth0 eth2 eth0; do
+for iface in eth0 eth2 ens19; do
     if ip link show $iface &>/dev/null; then
         NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
         SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
@@ -743,7 +743,7 @@ if [ "$IFACE" = "eth2" ] || [ "$IFACE" = "eth0" ]; then
     
     [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
     
-    for iface in eth0 eth2 eth0; do
+    for iface in eth0 eth2 ens19; do
         if ip link show $iface &>/dev/null; then
             NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
             SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
@@ -799,7 +799,7 @@ ip route flush table $IX_TABLE
 
 [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
 
-for iface in eth0 eth2 eth0; do
+for iface in eth0 eth2 ens19; do
     if ip link show $iface &>/dev/null; then
         NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
         SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
@@ -922,12 +922,12 @@ configure_policy_routing() {
     check_interface "eth2"
     print_success "eth2 存在"
     
-    HAS_eth0=false
-    if ip link show eth0 &>/dev/null; then
-        HAS_eth0=true
-        print_success "eth0 存在"
+    HAS_ENS19=false
+    if ip link show ens19 &>/dev/null; then
+        HAS_ENS19=true
+        print_success "ens19 存在"
     else
-        print_info "eth0 不存在（跳过）"
+        print_info "ens19 不存在（跳过）"
     fi
     
     echo ""
@@ -958,13 +958,13 @@ configure_policy_routing() {
     eth2_GATEWAY="__GATEWAY_IP__"
     print_success "eth2 Gateway: $eth2_GATEWAY (SNAT 服务器)"
     
-    if [ "$HAS_eth0" = true ]; then
+    if [ "$HAS_ENS19" = true ]; then
         echo ""
-        echo "【步骤4】读取 eth0 配置..."
-        eth0_IP=$(get_ip "eth0")
-        eth0_NETWORK=$(get_network "eth0")
-        print_success "eth0 IP: $eth0_IP"
-        print_success "eth0 网段: $eth0_NETWORK"
+        echo "【步骤4】读取 ens19 配置..."
+        ENS19_IP=$(get_ip "ens19")
+        ENS19_NETWORK=$(get_network "ens19")
+        print_success "ens19 IP: $ENS19_IP"
+        print_success "ens19 网段: $ENS19_NETWORK"
     fi
     
     echo ""
@@ -1007,9 +1007,9 @@ configure_policy_routing() {
     ip route add $eth2_NETWORK dev eth2 src $eth2_IP table $IX_TABLE
     print_success "添加路由: $eth2_NETWORK via eth2"
     
-    if [ "$HAS_eth0" = true ] && [ -n "$eth0_IP" ]; then
-        ip route add $eth0_NETWORK dev eth0 src $eth0_IP table $IX_TABLE
-        print_success "添加路由: $eth0_NETWORK via eth0"
+    if [ "$HAS_ENS19" = true ] && [ -n "$ENS19_IP" ]; then
+        ip route add $ENS19_NETWORK dev ens19 src $ENS19_IP table $IX_TABLE
+        print_success "添加路由: $ENS19_NETWORK via ens19"
     fi
     
     echo ""
@@ -1051,7 +1051,7 @@ configure_policy_routing() {
     echo "📌 网卡配置："
     echo "   • eth0 (IX): $IX_IP / $eth0_NETWORK -> $IX_GATEWAY"
     echo "   • eth2: $eth2_IP / $eth2_NETWORK -> $eth2_GATEWAY (SNAT服务器)"
-    [ "$HAS_eth0" = true ] && echo "   • eth0: $eth0_IP / $eth0_NETWORK"
+    [ "$HAS_ENS19" = true ] && echo "   • ens19: $ENS19_IP / $ENS19_NETWORK"
     echo ""
     echo "📌 DNS 配置："
     echo "   • 主 DNS: 1.1.1.1 (Cloudflare)"
