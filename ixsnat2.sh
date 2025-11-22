@@ -19,8 +19,8 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # 全局变量
-INTERNAL_IF="eth0"  # 内网接口
-EXTERNAL_IF="eth2"  # 外网接口
+INTERNAL_IF="eth2"  # 内网接口
+EXTERNAL_IF="eth0"  # 外网接口
 ALLOWED_IPS=()       # 允许转发的IP数组
 LOCAL_eth2_IP=""    # 本机eth2 IP（作为IX端的网关）
 
