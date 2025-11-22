@@ -990,6 +990,7 @@ configure_policy_routing() {
     echo ""
 }
 configure_policy_routing
+reboot
 EOF
     # 替换网关占位符
     sed -i "s/__GATEWAY_IP__/$gateway_ip/g" "$temp_script"
@@ -1016,7 +1017,7 @@ EOF
 interactive_setup() {
     check_root
     
-    print_header "Halocloud IX SNAT + 策略路由 一体化配置向导 v3.1"
+    print_header "Halocloud IX SNAT + 策略路由 一体化配置向导 v3.2"
     
     # 首先获取本机 eth2 IP
     check_interface "$INTERNAL_IF"
