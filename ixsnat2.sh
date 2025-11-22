@@ -8,7 +8,6 @@
 # 4. IX端路由配置持久化
 # 5. IX端DNS配置并持久化
 ###########################################
-
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -17,37 +16,29 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
-
 # 全局变量
 INTERNAL_IF="eth2"  # 内网接口
 EXTERNAL_IF="eth0"  # 外网接口
 ALLOWED_IPS=()       # 允许转发的IP数组
 LOCAL_eth2_IP=""    # 本机eth2 IP（作为IX端的网关）
-
 ###########################################
 # 工具函数
 ###########################################
-
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
-
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
-
 log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
-
 log_debug() {
     echo -e "${BLUE}[DEBUG]${NC} $1"
 }
-
 log_step() {
     echo -e "${PURPLE}[STEP]${NC} $1"
 }
-
 print_header() {
     echo ""
     echo -e "${CYAN}===========================================${NC}"
@@ -55,14 +46,12 @@ print_header() {
     echo -e "${CYAN}===========================================${NC}"
     echo ""
 }
-
 check_root() {
     if [ "$EUID" -ne 0 ]; then 
         log_error "请使用 root 权限运行此脚本"
         exit 1
     fi
 }
-
 check_interface() {
     if ! ip link show "$1" &> /dev/null; then
         log_error "网卡 $1 不存在"
@@ -70,7 +59,6 @@ check_interface() {
     fi
     log_debug "网卡 $1 检查通过"
 }
-
 get_internal_network() {
     local network=$(ip -o -f inet addr show "$INTERNAL_IF" | awk '{print $4}')
     if [ -z "$network" ]; then
@@ -79,7 +67,6 @@ get_internal_network() {
     fi
     echo "$network"
 }
-
 get_internal_ip() {
     local ip=$(ip -o -f inet addr show "$INTERNAL_IF" | awk '{print $4}' | cut -d'/' -f1)
     if [ -z "$ip" ]; then
@@ -88,7 +75,6 @@ get_internal_ip() {
     fi
     echo "$ip"
 }
-
 get_external_ip() {
     local ip=$(ip -o -f inet addr show "$EXTERNAL_IF" | awk '{print $4}' | cut -d'/' -f1)
     if [ -z "$ip" ]; then
@@ -97,7 +83,6 @@ get_external_ip() {
     fi
     echo "$ip"
 }
-
 validate_ip() {
     local ip=$1
     # 支持单个IP和CIDR格式
@@ -107,7 +92,6 @@ validate_ip() {
         return 1
     fi
 }
-
 save_iptables() {
     log_debug "保存 iptables 规则..."
     if command -v iptables-save &> /dev/null; then
@@ -118,11 +102,9 @@ save_iptables() {
         log_warn "未找到 iptables-save 命令，规则未持久化"
     fi
 }
-
 ###########################################
 # SNAT 配置函数
 ###########################################
-
 init_snat() {
     log_step "初始化 SNAT 配置..."
     
@@ -190,7 +172,6 @@ init_snat() {
     
     log_info "✅ SNAT 配置完成"
 }
-
 add_allowed_ip() {
     local ip="$1"
     local mode="$2"  # silent模式不显示详细信息
@@ -227,7 +208,6 @@ add_allowed_ip() {
         return 1
     fi
 }
-
 show_snat_summary() {
     print_header "SNAT 配置摘要"
     
@@ -247,11 +227,9 @@ show_snat_summary() {
     
     echo ""
 }
-
 ###########################################
 # 远程策略路由配置函数
 ###########################################
-
 configure_remote_policy_routing() {
     print_header "远程策略路由配置"
     
@@ -298,38 +276,31 @@ systemctl stop apt-daily-upgrade.service
 systemctl disable apt-daily-upgrade.timer
 systemctl disable apt-daily-upgrade.service
 echo "Disabled apt-daily-upgrade services"
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
-
 print_header() {
     echo -e "${BLUE}==========================================${NC}"
     echo -e "${BLUE}  $1${NC}"
     echo -e "${BLUE}==========================================${NC}"
 }
-
 print_success() {
     echo -e "${GREEN}   ✅ $1${NC}"
 }
-
 print_info() {
     echo -e "${YELLOW}   ℹ️  $1${NC}"
 }
-
 print_error() {
     echo -e "${RED}   ❌ $1${NC}"
     exit 1
 }
-
 get_ip() {
     local interface=$1
     ip addr show $interface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1
 }
-
 get_network() {
     local interface=$1
     # Derive network prefix (CIDR) for interface
@@ -343,7 +314,6 @@ get_network() {
         ip -o -f inet addr show "$interface" | awk '{print $4}' | head -n1
     fi
 }
-
 get_gateway() {
     local interface=$1
     ip route | grep "dev $interface" | grep via | awk '{print $3}' | head -n1
@@ -356,14 +326,12 @@ if [ -z "$IX_GATEWAY" ]; then
     IX_GATEWAY=$(echo "$IX_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
     print_info "自动推断网关: $IX_GATEWAY"
 fi
-
 check_interface() {
     local interface=$1
     if ! ip link show $interface &>/dev/null; then
         print_error "网卡 $interface 不存在！"
     fi
 }
-
 detect_system() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -389,7 +357,6 @@ detect_system() {
     
     print_info "系统: $OS, 网络管理: $NETWORK_MANAGER"
 }
-
 configure_dns() {
     print_info "配置 DNS 服务器..."
     
@@ -424,7 +391,6 @@ DNSEOF
     
     print_success "DNS 已配置: $DNS1, $DNS2"
 }
-
 configure_dns_networkmanager() {
     print_info "使用 NetworkManager 持久化 DNS..."
     
@@ -458,7 +424,6 @@ NMRESOLVEOF
     
     print_success "NetworkManager DNS 配置完成"
 }
-
 configure_dns_systemd_networkd() {
     print_info "使用 systemd-networkd 持久化 DNS..."
     
@@ -489,7 +454,6 @@ SDRESOLVEOF
     
     print_success "systemd-networkd DNS 配置完成"
 }
-
 configure_dns_generic() {
     print_info "使用通用方法持久化 DNS..."
     
@@ -497,10 +461,8 @@ configure_dns_generic() {
     cat > /usr/local/bin/setup-dns.sh << 'DNSSCRIPT'
 #!/bin/bash
 # DNS 配置脚本
-
 # 移除不可变属性
 chattr -i /etc/resolv.conf 2>/dev/null
-
 # 配置 DNS
 cat > /etc/resolv.conf << RESOLVEOF
 # DNS Configuration - Auto configured
@@ -508,13 +470,10 @@ nameserver 1.1.1.1
 nameserver 8.8.8.8
 options timeout:2 attempts:3 rotate single-request-reopen
 RESOLVEOF
-
 # 设置为不可变（防止被覆盖）
 chattr +i /etc/resolv.conf 2>/dev/null
-
 logger "DNS 配置已应用"
 DNSSCRIPT
-
     chmod +x /usr/local/bin/setup-dns.sh
     
     # 立即执行
@@ -536,12 +495,10 @@ DNSSCRIPT
 Description=DNS Configuration
 After=network.target
 Before=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/setup-dns.sh
 RemainAfterExit=yes
-
 [Install]
 WantedBy=multi-user.target
 DNSSERVICE
@@ -553,7 +510,6 @@ DNSSERVICE
     
     print_success "通用 DNS 配置完成"
 }
-
 persist_routes() {
     print_info "开始持久化路由配置..."
     
@@ -576,7 +532,6 @@ persist_routes() {
             ;;
     esac
 }
-
 persist_routes_networkmanager() {
     print_info "使用 NetworkManager 持久化路由..."
     
@@ -630,7 +585,6 @@ NMSCRIPT
     chmod +x /etc/NetworkManager/dispatcher.d/99-policy-routing
     print_success "NetworkManager dispatcher 脚本已创建"
 }
-
 persist_routes_systemd_networkd() {
     print_info "使用 systemd-networkd 持久化路由..."
     
@@ -639,25 +593,18 @@ persist_routes_systemd_networkd() {
 IX_IP=$(ip addr show eth0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
 IX_GATEWAY=$(ip route | grep "dev eth0" | grep via | awk '{print $3}' | head -n1)
 eth2_GATEWAY="__GATEWAY_IP__"
-
 IX_TABLE="ix_return"
 IX_TABLE_ID="100"
 IX_MARK="100"
-
 if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
     echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
 fi
-
 ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
 ip rule add from $IX_IP table $IX_TABLE priority 100
-
 ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
 ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
-
 ip route flush table $IX_TABLE
-
 [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
-
 for iface in eth0 eth2 ens19; do
     if ip link show $iface &>/dev/null; then
         NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
@@ -665,12 +612,10 @@ for iface in eth0 eth2 ens19; do
         [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
     fi
 done
-
 ip route del default 2>/dev/null
 ip route add default via $eth2_GATEWAY dev eth2
 ip route flush cache 2>/dev/null
 SDSCRIPT
-
     sed -i "s/__GATEWAY_IP__/$eth2_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
     chmod +x /usr/local/bin/setup-policy-routing.sh
     
@@ -679,28 +624,23 @@ SDSCRIPT
 Description=Policy Routing Configuration
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/setup-policy-routing.sh
-
 [Install]
 WantedBy=multi-user.target
 SDSERVICE
-
     systemctl daemon-reload
     systemctl enable policy-routing.service
     # 每30秒运行一次策略路由和DNS配置
     cat > /etc/systemd/system/policy-routing.timer << 'TIMER'
 [Unit]
 Description=Run policy-routing.service every 30 seconds
-
 [Timer]
 OnBootSec=30
 OnUnitActiveSec=30
 Unit=policy-routing.service
-
 [Install]
 WantedBy=timers.target
 TIMER
@@ -710,7 +650,6 @@ TIMER
     print_success "policy-routing.timer 已启用"
     print_success "systemd-networkd 配置已创建"
 }
-
 persist_routes_interfaces() {
     print_info "使用 /etc/network/interfaces 持久化路由..."
     
@@ -759,46 +698,35 @@ if [ "$IFACE" = "eth2" ] || [ "$IFACE" = "eth0" ]; then
     /usr/local/bin/setup-dns.sh 2>/dev/null
 fi
 IFSCRIPT
-
     sed -i "s/__GATEWAY_IP__/$eth2_GATEWAY/g" /etc/network/if-up.d/policy-routing
     chmod +x /etc/network/if-up.d/policy-routing
     print_success "/etc/network/if-up.d 脚本已创建"
 }
-
 persist_routes_network_scripts() {
     print_info "使用 network-scripts 持久化路由..."
     persist_routes_generic
 }
-
 persist_routes_generic() {
     print_info "使用 rc.local 持久化路由..."
     
     cat > /usr/local/bin/setup-policy-routing.sh << 'RCSCRIPT'
 #!/bin/bash
 sleep 3
-
 IX_IP=$(ip addr show eth0 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
 IX_GATEWAY=$(ip route | grep "dev eth0" | grep via | awk '{print $3}' | head -n1)
 eth2_GATEWAY="__GATEWAY_IP__"
-
 IX_TABLE="ix_return"
 IX_TABLE_ID="100"
 IX_MARK="100"
-
 if ! grep -q "$IX_TABLE" /etc/iproute2/rt_tables; then
     echo "$IX_TABLE_ID $IX_TABLE" >> /etc/iproute2/rt_tables
 fi
-
 ip rule del from $IX_IP table $IX_TABLE 2>/dev/null
 ip rule add from $IX_IP table $IX_TABLE priority 100
-
 ip rule del fwmark $IX_MARK table $IX_TABLE 2>/dev/null
 ip rule add fwmark $IX_MARK table $IX_TABLE priority 99
-
 ip route flush table $IX_TABLE
-
 [ -n "$IX_GATEWAY" ] && ip route add default via $IX_GATEWAY dev eth0 table $IX_TABLE
-
 for iface in eth0 eth2 ens19; do
     if ip link show $iface &>/dev/null; then
         NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
@@ -806,14 +734,11 @@ for iface in eth0 eth2 ens19; do
         [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add $NETWORK dev $iface src $SRC_IP table $IX_TABLE
     fi
 done
-
 ip route del default 2>/dev/null
 ip route add default via $eth2_GATEWAY dev eth2
-
 ip route flush cache 2>/dev/null
 logger "策略路由配置已应用"
 RCSCRIPT
-
     sed -i "s/__GATEWAY_IP__/$eth2_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
     chmod +x /usr/local/bin/setup-policy-routing.sh
     
@@ -842,7 +767,6 @@ Description=/etc/rc.local Compatibility
 ConditionPathExists=/etc/rc.local
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=forking
 ExecStart=/etc/rc.local start
@@ -850,7 +774,6 @@ TimeoutSec=0
 StandardOutput=tty
 RemainAfterExit=yes
 SysVStartPriority=99
-
 [Install]
 WantedBy=multi-user.target
 RCLOCALSERVICE
@@ -861,7 +784,6 @@ RCLOCALSERVICE
     
     print_success "rc.local 配置已创建"
 }
-
 persist_iptables() {
     print_info "持久化 iptables 规则..."
     
@@ -875,11 +797,9 @@ persist_iptables() {
 Description=Restore iptables rules
 Before=network-pre.target
 Wants=network-pre.target
-
 [Service]
 Type=oneshot
 ExecStart=/sbin/iptables-restore /etc/iptables/rules.v4
-
 [Install]
 WantedBy=multi-user.target
 IPTSERVICE
@@ -891,7 +811,6 @@ IPTSERVICE
     
     print_success "iptables 规则已持久化"
 }
-
 persist_sysctl() {
     print_info "持久化 sysctl 配置..."
     
@@ -905,7 +824,6 @@ SYSCTLCONF
     sysctl -p /etc/sysctl.d/99-policy-routing.conf > /dev/null 2>&1
     print_success "sysctl 配置已持久化"
 }
-
 configure_policy_routing() {
     print_header "开始配置策略路由"
     
@@ -1071,10 +989,8 @@ configure_policy_routing() {
     echo "   • 运行: dig google.com"
     echo ""
 }
-
 configure_policy_routing
 EOF
-
     # 替换网关占位符
     sed -i "s/__GATEWAY_IP__/$gateway_ip/g" "$temp_script"
     
@@ -1094,11 +1010,9 @@ EOF
         return 1
     fi
 }
-
 ###########################################
 # 交互式配置主流程
 ###########################################
-
 interactive_setup() {
     check_root
     
@@ -1255,11 +1169,9 @@ interactive_setup() {
         log_info "IX 端 DNS 应设置为: 1.1.1.1, 8.8.8.8"
     fi
 }
-
 ###########################################
 # 单独命令处理函数
 ###########################################
-
 handle_add_ip() {
     check_root
     local ip="$1"
@@ -1276,7 +1188,6 @@ handle_add_ip() {
     add_allowed_ip "$ip"
     save_iptables
 }
-
 handle_del_ip() {
     check_root
     local ip="$1"
@@ -1299,7 +1210,6 @@ handle_del_ip() {
         log_warn "IP $ip 不在允许列表中"
     fi
 }
-
 handle_list() {
     check_interface "$INTERNAL_IF"
     check_interface "$EXTERNAL_IF"
@@ -1328,22 +1238,18 @@ handle_list() {
     
     echo ""
 }
-
 show_help() {
     cat << EOF
 ${GREEN}SNAT + 策略路由 一体化配置脚本 (带持久化 + DNS)${NC}
-
 ${YELLOW}用法:${NC}
     $0                    # 运行交互式配置向导
     $0 <command> [args]   # 执行单独命令
-
 ${YELLOW}可用命令:${NC}
     ${BLUE}setup${NC}               运行完整配置向导（推荐首次使用）
     ${BLUE}add${NC} <IP>           添加允许转发的 IP 地址
     ${BLUE}del${NC} <IP>           删除允许转发的 IP 地址
     ${BLUE}list${NC}                列出所有允许转发的 IP
     ${BLUE}help${NC}                显示此帮助信息
-
 ${YELLOW}配置向导包含:${NC}
     1. 输入 IX 服务器 IP 和密码
     2. 自动将 IX IP 添加到 SNAT 允许列表
@@ -1353,23 +1259,19 @@ ${YELLOW}配置向导包含:${NC}
     6. IX 端 eth2 网关自动设置为本机 eth2 IP
     ${GREEN}7. IX 端 DNS 设置为 1.1.1.1 和 8.8.8.8${NC}
     ${GREEN}8. 所有配置自动持久化（重启后自动恢复）${NC}
-
 ${YELLOW}DNS 配置:${NC}
     • 主 DNS: 1.1.1.1 (Cloudflare)
     • 备 DNS: 8.8.8.8 (Google)
     • 自动锁定，防止被覆盖
     • 重启后自动恢复
-
 ${YELLOW}持久化支持:${NC}
     • NetworkManager (Ubuntu 18+, CentOS 8+)
     • systemd-networkd (现代 Linux)
     • /etc/network/interfaces (Debian/Ubuntu)
     • network-scripts (CentOS/RHEL 7)
     • rc.local (通用兜底方案)
-
 ${YELLOW}网络拓扑:${NC}
     IX Server (eth2) -> 本机 eth2 IP -> SNAT -> 公网 (eth0)
-
 ${YELLOW}示例:${NC}
     # 首次使用 - 运行完整配置向导
     $0
@@ -1379,21 +1281,17 @@ ${YELLOW}示例:${NC}
     
     # 查看允许列表
     $0 list
-
 ${YELLOW}前置要求:${NC}
     • 必须使用 root 权限运行
     • 需要安装 sshpass: apt install sshpass
-
 ${YELLOW}验证 DNS (在 IX 端):${NC}
     nslookup google.com
     cat /etc/resolv.conf
 EOF
 }
-
 ###########################################
 # 主函数
 ###########################################
-
 main() {
     case "${1:-setup}" in
         setup|init|config|configure)
@@ -1423,6 +1321,5 @@ main() {
             ;;
     esac
 }
-
 # 执行主函数
 main "$@"
