@@ -24,6 +24,55 @@ LOCAL_eth2_IP=""    # 本机eth2 IP（作为IX端的网关）
 ###########################################
 # 工具函数
 ###########################################
+detect_os() {
+  if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
+  else
+    OS=$(uname -s)
+  fi
+  echo "$OS"
+}
+OS=$(detect_os)
+install_dependencies() {
+  # 1. 自动分析：检查 sshpass 是否已安装
+  if command -v sshpass >/dev/null 2>&1; then
+    green "检测到 sshpass 已存在，跳过安装。"
+    return 0
+  fi
+
+  # 2. 如果不存在，则进行安装
+  yellow "未检测到 sshpass，准备安装..."
+  case "$OS" in
+    ubuntu|debian)
+      sudo apt update
+      sudo apt install -y sshpass >/dev/null 2>&1
+      ;;
+    centos|rhel|rocky|alma)
+      # sshpass 在 EPEL 源中
+      if ! rpm -q epel-release >/dev/null 2>&1; then
+          sudo yum install -y epel-release >/dev/null 2>&1
+      fi
+      sudo yum install -y sshpass >/dev/null 2>&1
+      ;;
+    alpine)
+      sudo apk update
+      sudo apk add --no-cache sshpass
+      ;;
+    *)
+      red "不支持的系统: $OS，请手动安装 sshpass"
+      exit 1
+      ;;
+  esac
+
+  # 3. 安装后验证
+  if command -v sshpass >/dev/null 2>&1; then
+    green "sshpass 安装成功！"
+  else
+    red "sshpass 安装失败，请检查网络或源设置。"
+    exit 1
+  fi
+}
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -243,6 +292,8 @@ configure_remote_policy_routing() {
     # SSH配置
     local ssh_port=22
     local ssh_user="root"
+    
+    install_dependencies
     
     # 检测SSH连接
     log_step "测试 SSH 连接..."
