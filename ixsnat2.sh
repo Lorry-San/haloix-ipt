@@ -16,6 +16,15 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+green() {
+    echo -e "${GREEN}$1${NC}"
+}
+yellow() {
+    echo -e "${YELLOW}$1${NC}"
+}
+red() {
+    echo -e "${RED}$1${NC}"
+}
 # 全局变量
 INTERNAL_IF=""      # 内网接口，自动检测：ens20 或 eth2
 EXTERNAL_IF=""      # IX/公网接口，自动检测：ens18 或 eth0
