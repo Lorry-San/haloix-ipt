@@ -311,12 +311,13 @@ configure_remote_policy_routing() {
     local remote_ip="$1"
     local remote_password="$2"
     local gateway_ip="$3"  # 本机内网 IP，作为 IX 端内网网关
+    local ssh_port="${4:-22}"
     
     log_info "目标服务器: $remote_ip"
+    log_info "SSH 端口: $ssh_port"
     log_info "IX 端内网网关将设置为: $gateway_ip (本机 $INTERNAL_IF)"
     
     # SSH配置
-    local ssh_port=22
     local ssh_user="root"
     
     install_dependencies
@@ -1181,6 +1182,13 @@ interactive_setup() {
         exit 1
     fi
     
+    read -p "请输入 IX 服务器的 SSH 端口 [22]: " IX_SERVER_SSH_PORT
+    IX_SERVER_SSH_PORT=${IX_SERVER_SSH_PORT:-22}
+    if ! [[ "$IX_SERVER_SSH_PORT" =~ ^[0-9]+$ ]] || [ "$IX_SERVER_SSH_PORT" -lt 1 ] || [ "$IX_SERVER_SSH_PORT" -gt 65535 ]; then
+        log_error "无效的 SSH 端口！"
+        exit 1
+    fi
+
     read -s -p "请输入 IX 服务器的 SSH 密码: " IX_SERVER_PASSWORD
     echo ""
     
@@ -1214,6 +1222,7 @@ interactive_setup() {
     echo ""
     echo -e "  ${YELLOW}远程 IX 服务器:${NC}"
     echo "    IP: $IX_SERVER_IP"
+    echo "    SSH 端口: $IX_SERVER_SSH_PORT"
     echo "    内网网关将设置为: ${GREEN}$LOCAL_eth2_IP${NC} (本机 $INTERNAL_IF)"
     echo "    DNS: 1.1.1.1, 8.8.8.8"
     echo "    将配置策略路由并持久化"
@@ -1265,7 +1274,7 @@ interactive_setup() {
     log_step "【阶段 2/2】配置远程策略路由、DNS 并持久化..."
     echo ""
     
-    if configure_remote_policy_routing "$IX_SERVER_IP" "$IX_SERVER_PASSWORD" "$LOCAL_eth2_IP"; then
+    if configure_remote_policy_routing "$IX_SERVER_IP" "$IX_SERVER_PASSWORD" "$LOCAL_eth2_IP" "$IX_SERVER_SSH_PORT"; then
         print_header "🎉 全部配置完成！"
         echo ""
         echo -e "${GREEN}✅ 本地 SNAT 配置成功${NC}"
@@ -1278,6 +1287,7 @@ interactive_setup() {
         echo "  • 本机 IX/公网接口: $EXTERNAL_IF"
         echo "  • 允许转发的 IP 数量: ${#ALLOWED_IPS[@]}"
         echo "  • 远程 IX 服务器: $IX_SERVER_IP"
+        echo "  • 远程 SSH 端口: $IX_SERVER_SSH_PORT"
         echo "  • IX 内网网关: $LOCAL_eth2_IP (指向本机 $INTERNAL_IF)"
         echo "  • IX DNS: 1.1.1.1, 8.8.8.8"
         echo ""
