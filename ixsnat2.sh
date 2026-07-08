@@ -649,8 +649,18 @@ if [ "$2" = "up" ]; then
     detect_policy_interfaces
     
     IX_IP=$(ip addr show "$IX_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
-    IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+    IX_GATEWAY="__IX_GATEWAY__"
+    [ "$IX_GATEWAY" = "__IX_GATEWAY__" ] && IX_GATEWAY=""
+    [ -n "$IX_GATEWAY" ] || IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+    if [ -z "$IX_GATEWAY" ] && [ -n "$IX_IP" ]; then
+        IX_GATEWAY=$(echo "$IX_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
+    fi
     LAN_GATEWAY="__GATEWAY_IP__"
+    [ "$LAN_GATEWAY" = "__GATEWAY_IP__" ] && LAN_GATEWAY=""
+    if [ -z "$IX_IP" ] || [ -z "$IX_GATEWAY" ] || [ -z "$LAN_GATEWAY" ]; then
+        logger "policy-routing: missing IX_IP, IX_GATEWAY, or LAN_GATEWAY; skip route rewrite"
+        exit 1
+    fi
     
     IX_TABLE="ix_return"
     IX_TABLE_ID="100"
@@ -671,9 +681,9 @@ if [ "$2" = "up" ]; then
     [ -n "$IX_GATEWAY" ] && ip route add default via "$IX_GATEWAY" dev "$IX_IF" table "$IX_TABLE"
     
     for iface in "$IX_IF" "$LAN_IF" ens19; do
-        if ip link show $iface &>/dev/null; then
-            NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-            SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        if ip link show "$iface" &>/dev/null; then
+            NETWORK=$(ip route show dev "$iface" scope link 2>/dev/null | awk 'NR==1{print $1}')
+            SRC_IP=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
             [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add "$NETWORK" dev "$iface" src "$SRC_IP" table "$IX_TABLE"
         fi
     done
@@ -688,6 +698,7 @@ fi
 NMSCRIPT
     
     sed -i "s/__GATEWAY_IP__/$LAN_GATEWAY/g" /etc/NetworkManager/dispatcher.d/99-policy-routing
+    sed -i "s/__IX_GATEWAY__/$IX_GATEWAY/g" /etc/NetworkManager/dispatcher.d/99-policy-routing
     chmod +x /etc/NetworkManager/dispatcher.d/99-policy-routing
     print_success "NetworkManager dispatcher 脚本已创建"
 }
@@ -713,8 +724,18 @@ detect_policy_interfaces() {
 }
 detect_policy_interfaces
 IX_IP=$(ip addr show "$IX_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
-IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+IX_GATEWAY="__IX_GATEWAY__"
+[ "$IX_GATEWAY" = "__IX_GATEWAY__" ] && IX_GATEWAY=""
+[ -n "$IX_GATEWAY" ] || IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+if [ -z "$IX_GATEWAY" ] && [ -n "$IX_IP" ]; then
+    IX_GATEWAY=$(echo "$IX_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
+fi
 LAN_GATEWAY="__GATEWAY_IP__"
+[ "$LAN_GATEWAY" = "__GATEWAY_IP__" ] && LAN_GATEWAY=""
+if [ -z "$IX_IP" ] || [ -z "$IX_GATEWAY" ] || [ -z "$LAN_GATEWAY" ]; then
+    logger "policy-routing: missing IX_IP, IX_GATEWAY, or LAN_GATEWAY; skip route rewrite"
+    exit 1
+fi
 IX_TABLE="ix_return"
 IX_TABLE_ID="100"
 IX_MARK="100"
@@ -728,9 +749,9 @@ ip rule add fwmark "$IX_MARK" table "$IX_TABLE" priority 99
 ip route flush table "$IX_TABLE"
 [ -n "$IX_GATEWAY" ] && ip route add default via "$IX_GATEWAY" dev "$IX_IF" table "$IX_TABLE"
 for iface in "$IX_IF" "$LAN_IF" ens19; do
-    if ip link show $iface &>/dev/null; then
-        NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-        SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    if ip link show "$iface" &>/dev/null; then
+        NETWORK=$(ip route show dev "$iface" scope link 2>/dev/null | awk 'NR==1{print $1}')
+        SRC_IP=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
         [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add "$NETWORK" dev "$iface" src "$SRC_IP" table "$IX_TABLE"
     fi
 done
@@ -739,6 +760,7 @@ ip route add default via "$LAN_GATEWAY" dev "$LAN_IF"
 ip route flush cache 2>/dev/null
 SDSCRIPT
     sed -i "s/__GATEWAY_IP__/$LAN_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
+    sed -i "s/__IX_GATEWAY__/$IX_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
     chmod +x /usr/local/bin/setup-policy-routing.sh
     
     cat > /etc/systemd/system/policy-routing.service << 'SDSERVICE'
@@ -790,8 +812,18 @@ if [ "$IFACE" = "$LAN_IF" ] || [ "$IFACE" = "$IX_IF" ]; then
     sleep 2
     
     IX_IP=$(ip addr show "$IX_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
-    IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+    IX_GATEWAY="__IX_GATEWAY__"
+    [ "$IX_GATEWAY" = "__IX_GATEWAY__" ] && IX_GATEWAY=""
+    [ -n "$IX_GATEWAY" ] || IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+    if [ -z "$IX_GATEWAY" ] && [ -n "$IX_IP" ]; then
+        IX_GATEWAY=$(echo "$IX_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
+    fi
     LAN_GATEWAY="__GATEWAY_IP__"
+    [ "$LAN_GATEWAY" = "__GATEWAY_IP__" ] && LAN_GATEWAY=""
+    if [ -z "$IX_IP" ] || [ -z "$IX_GATEWAY" ] || [ -z "$LAN_GATEWAY" ]; then
+        logger "policy-routing: missing IX_IP, IX_GATEWAY, or LAN_GATEWAY; skip route rewrite"
+        exit 1
+    fi
     
     IX_TABLE="ix_return"
     IX_TABLE_ID="100"
@@ -812,9 +844,9 @@ if [ "$IFACE" = "$LAN_IF" ] || [ "$IFACE" = "$IX_IF" ]; then
     [ -n "$IX_GATEWAY" ] && ip route add default via "$IX_GATEWAY" dev "$IX_IF" table "$IX_TABLE"
     
     for iface in "$IX_IF" "$LAN_IF" ens19; do
-        if ip link show $iface &>/dev/null; then
-            NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-            SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+        if ip link show "$iface" &>/dev/null; then
+            NETWORK=$(ip route show dev "$iface" scope link 2>/dev/null | awk 'NR==1{print $1}')
+            SRC_IP=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
             [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add "$NETWORK" dev "$iface" src "$SRC_IP" table "$IX_TABLE"
         fi
     done
@@ -828,6 +860,7 @@ if [ "$IFACE" = "$LAN_IF" ] || [ "$IFACE" = "$IX_IF" ]; then
 fi
 IFSCRIPT
     sed -i "s/__GATEWAY_IP__/$LAN_GATEWAY/g" /etc/network/if-up.d/policy-routing
+    sed -i "s/__IX_GATEWAY__/$IX_GATEWAY/g" /etc/network/if-up.d/policy-routing
     chmod +x /etc/network/if-up.d/policy-routing
     print_success "/etc/network/if-up.d 脚本已创建"
 }
@@ -858,8 +891,18 @@ detect_policy_interfaces() {
 }
 detect_policy_interfaces
 IX_IP=$(ip addr show "$IX_IF" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
-IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+IX_GATEWAY="__IX_GATEWAY__"
+[ "$IX_GATEWAY" = "__IX_GATEWAY__" ] && IX_GATEWAY=""
+[ -n "$IX_GATEWAY" ] || IX_GATEWAY=$(ip route | grep "dev $IX_IF" | grep via | awk '{print $3}' | head -n1)
+if [ -z "$IX_GATEWAY" ] && [ -n "$IX_IP" ]; then
+    IX_GATEWAY=$(echo "$IX_IP" | awk -F'.' '{print $1"."$2"."$3".1"}')
+fi
 LAN_GATEWAY="__GATEWAY_IP__"
+[ "$LAN_GATEWAY" = "__GATEWAY_IP__" ] && LAN_GATEWAY=""
+if [ -z "$IX_IP" ] || [ -z "$IX_GATEWAY" ] || [ -z "$LAN_GATEWAY" ]; then
+    logger "policy-routing: missing IX_IP, IX_GATEWAY, or LAN_GATEWAY; skip route rewrite"
+    exit 1
+fi
 IX_TABLE="ix_return"
 IX_TABLE_ID="100"
 IX_MARK="100"
@@ -873,9 +916,9 @@ ip rule add fwmark "$IX_MARK" table "$IX_TABLE" priority 99
 ip route flush table "$IX_TABLE"
 [ -n "$IX_GATEWAY" ] && ip route add default via "$IX_GATEWAY" dev "$IX_IF" table "$IX_TABLE"
 for iface in "$IX_IF" "$LAN_IF" ens19; do
-    if ip link show $iface &>/dev/null; then
-        NETWORK=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | head -n1)
-        SRC_IP=$(ip addr show $iface 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    if ip link show "$iface" &>/dev/null; then
+        NETWORK=$(ip route show dev "$iface" scope link 2>/dev/null | awk 'NR==1{print $1}')
+        SRC_IP=$(ip addr show "$iface" 2>/dev/null | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -n1)
         [ -n "$NETWORK" ] && [ -n "$SRC_IP" ] && ip route add "$NETWORK" dev "$iface" src "$SRC_IP" table "$IX_TABLE"
     fi
 done
@@ -885,6 +928,7 @@ ip route flush cache 2>/dev/null
 logger "策略路由配置已应用"
 RCSCRIPT
     sed -i "s/__GATEWAY_IP__/$LAN_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
+    sed -i "s/__IX_GATEWAY__/$IX_GATEWAY/g" /usr/local/bin/setup-policy-routing.sh
     chmod +x /usr/local/bin/setup-policy-routing.sh
     
     if [ -f /etc/rc.local ]; then
