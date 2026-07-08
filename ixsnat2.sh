@@ -117,13 +117,16 @@ check_interface() {
     fi
     log_debug "网卡 $1 检查通过"
 }
+canonical_ifname() {
+    ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+}
 detect_interfaces() {
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        EXTERNAL_IF="ens18"
-        INTERNAL_IF="ens20"
+        EXTERNAL_IF=$(canonical_ifname ens18)
+        INTERNAL_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        EXTERNAL_IF="eth0"
-        INTERNAL_IF="eth2"
+        EXTERNAL_IF=$(canonical_ifname eth0)
+        INTERNAL_IF=$(canonical_ifname eth2)
     else
         log_error "无法自动识别网卡：需要 ens18/ens20 或 eth0/eth2 组合"
         exit 1
@@ -396,13 +399,16 @@ get_gateway() {
     local interface=$1
     ip route | grep "dev $interface" | grep via | awk '{print $3}' | head -n1
 }
+canonical_ifname() {
+    ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+}
 detect_ix_interfaces() {
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        IX_IF="ens18"
-        LAN_IF="ens20"
+        IX_IF=$(canonical_ifname ens18)
+        LAN_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        IX_IF="eth0"
-        LAN_IF="eth2"
+        IX_IF=$(canonical_ifname eth0)
+        LAN_IF=$(canonical_ifname eth2)
     else
         print_error "无法自动识别网卡：需要 ens18/ens20 或 eth0/eth2 组合"
     fi
@@ -623,12 +629,15 @@ persist_routes_networkmanager() {
     cat > /etc/NetworkManager/dispatcher.d/99-policy-routing << 'NMSCRIPT'
 #!/bin/bash
 detect_policy_interfaces() {
+    canonical_ifname() {
+        ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+    }
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        IX_IF="ens18"
-        LAN_IF="ens20"
+        IX_IF=$(canonical_ifname ens18)
+        LAN_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        IX_IF="eth0"
-        LAN_IF="eth2"
+        IX_IF=$(canonical_ifname eth0)
+        LAN_IF=$(canonical_ifname eth2)
     else
         logger "policy-routing: no supported interface pair found"
         exit 1
@@ -688,12 +697,15 @@ persist_routes_systemd_networkd() {
     cat > /usr/local/bin/setup-policy-routing.sh << 'SDSCRIPT'
 #!/bin/bash
 detect_policy_interfaces() {
+    canonical_ifname() {
+        ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+    }
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        IX_IF="ens18"
-        LAN_IF="ens20"
+        IX_IF=$(canonical_ifname ens18)
+        LAN_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        IX_IF="eth0"
-        LAN_IF="eth2"
+        IX_IF=$(canonical_ifname eth0)
+        LAN_IF=$(canonical_ifname eth2)
     else
         logger "policy-routing: no supported interface pair found"
         exit 1
@@ -768,12 +780,15 @@ persist_routes_interfaces() {
     cat > /etc/network/if-up.d/policy-routing << 'IFSCRIPT'
 #!/bin/bash
 detect_policy_interfaces() {
+    canonical_ifname() {
+        ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+    }
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        IX_IF="ens18"
-        LAN_IF="ens20"
+        IX_IF=$(canonical_ifname ens18)
+        LAN_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        IX_IF="eth0"
-        LAN_IF="eth2"
+        IX_IF=$(canonical_ifname eth0)
+        LAN_IF=$(canonical_ifname eth2)
     else
         logger "policy-routing: no supported interface pair found"
         exit 1
@@ -837,12 +852,15 @@ persist_routes_generic() {
 #!/bin/bash
 sleep 3
 detect_policy_interfaces() {
+    canonical_ifname() {
+        ip -o link show "$1" 2>/dev/null | awk -F': ' 'NR==1 {print $2}' | cut -d'@' -f1
+    }
     if ip link show ens18 &>/dev/null && ip link show ens20 &>/dev/null; then
-        IX_IF="ens18"
-        LAN_IF="ens20"
+        IX_IF=$(canonical_ifname ens18)
+        LAN_IF=$(canonical_ifname ens20)
     elif ip link show eth0 &>/dev/null && ip link show eth2 &>/dev/null; then
-        IX_IF="eth0"
-        LAN_IF="eth2"
+        IX_IF=$(canonical_ifname eth0)
+        LAN_IF=$(canonical_ifname eth2)
     else
         logger "policy-routing: no supported interface pair found"
         exit 1
