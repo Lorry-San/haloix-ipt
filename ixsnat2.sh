@@ -755,21 +755,11 @@ WantedBy=multi-user.target
 SDSERVICE
     systemctl daemon-reload
     systemctl enable policy-routing.service
-    # 每30秒运行一次策略路由和DNS配置
-    cat > /etc/systemd/system/policy-routing.timer << 'TIMER'
-[Unit]
-Description=Run policy-routing.service every 30 seconds
-[Timer]
-OnBootSec=30
-OnUnitActiveSec=30
-Unit=policy-routing.service
-[Install]
-WantedBy=timers.target
-TIMER
+    systemctl restart policy-routing.service 2>/dev/null || true
+    systemctl disable --now policy-routing.timer 2>/dev/null || true
+    rm -f /etc/systemd/system/policy-routing.timer
     systemctl daemon-reload
-    systemctl enable policy-routing.timer
-    systemctl start policy-routing.timer
-    print_success "policy-routing.timer 已启用"
+    print_success "policy-routing.service 已启用（仅开机执行，不周期覆盖）"
     print_success "systemd-networkd 配置已创建"
 }
 persist_routes_interfaces() {
